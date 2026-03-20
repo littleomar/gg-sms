@@ -49,6 +49,7 @@ export class GgSmsApp {
     this.#bot = new TelegramBotService({
       botToken: config.botToken,
       adminId: config.botAdminId,
+      telegramProxyUrl: config.telegramProxyUrl,
       modem: this.#modem,
       database: this.#database,
       drafts: this.#draftSessions,

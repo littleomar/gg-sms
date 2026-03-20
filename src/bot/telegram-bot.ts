@@ -3,9 +3,9 @@ import { Markup, Telegraf, type Context } from "telegraf";
 import type { AccountProvider } from "../account/provider";
 import type { KeepaliveJob } from "../jobs/keepalive-job";
 import type { ModemProvider } from "../modem/types";
+import { createTelegramProxyAgent } from "./proxy-agent";
 import { isAdminUser } from "./auth";
 import type { DraftSessionService } from "../sms/draft-session-service";
-import { estimateSmsSegments } from "../sms/encoding";
 import type { AppDatabase } from "../storage/database";
 
 type AppContext = Context;
@@ -128,13 +128,22 @@ export class TelegramBotService {
   constructor(options: {
     botToken: string;
     adminId: string;
+    telegramProxyUrl?: string;
     modem: ModemProvider;
     database: AppDatabase;
     drafts: DraftSessionService;
     accountProvider: AccountProvider;
     keepaliveJob: KeepaliveJob;
   }) {
-    this.#bot = new Telegraf<AppContext>(options.botToken);
+    const proxyAgent = createTelegramProxyAgent(options.telegramProxyUrl);
+    this.#bot = new Telegraf<AppContext>(options.botToken, {
+      telegram: proxyAgent
+        ? {
+            agent: proxyAgent,
+            attachmentAgent: proxyAgent,
+          }
+        : undefined,
+    });
     this.#adminId = options.adminId;
     this.#chatId = options.adminId;
     this.#modem = options.modem;
