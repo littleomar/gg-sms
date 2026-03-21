@@ -1,18 +1,39 @@
 import { loadConfig } from "./config";
 import { GgSmsApp } from "./app";
+import { configureLogger, createLogger } from "./logger";
 
 const config = loadConfig();
+configureLogger(config.logLevel);
+const logger = createLogger("index");
 const app = new GgSmsApp(config);
 
-console.log("Starting gg-sms...");
+logger.info("Starting gg-sms.", {
+  modemPort: config.modemPort,
+  logLevel: config.logLevel,
+  smsPollIntervalMs: config.smsPollIntervalMs,
+});
 await app.start();
-console.log(`gg-sms service loop started with modem port ${config.modemPort}`);
+logger.info("gg-sms service loop started.", {
+  modemPort: config.modemPort,
+});
 
 const shutdown = async (signal: string) => {
-  console.log(`Received ${signal}, shutting down...`);
-  await app.stop();
-  process.exit(0);
+  logger.info("Received shutdown signal.", { signal });
+  try {
+    await app.stop();
+    logger.info("Application stopped cleanly.");
+    process.exit(0);
+  } catch (error) {
+    logger.error("Application shutdown failed.", { error });
+    process.exit(1);
+  }
 };
 
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("unhandledRejection", (reason) => {
+  logger.error("Unhandled promise rejection.", { reason });
+});
+process.on("uncaughtException", (error) => {
+  logger.error("Uncaught exception.", { error });
+});

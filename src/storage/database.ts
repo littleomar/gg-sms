@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 
 import { Database } from "bun:sqlite";
 
+import { createLogger } from "../logger";
 import type { AccountTrackingState, AlertLevel, InsertOutboundSmsInput, JobRunStatus, StoredSmsMessage } from "./types";
 import type { InboundSms } from "../modem/types";
 import type { SmsDraftSession } from "../sms/draft-session-service";
@@ -58,12 +59,15 @@ type BotRuntimeRow = {
   account_dashboard_cookie_updated_at: string | null;
 };
 
+const logger = createLogger("database");
+
 export class AppDatabase {
   readonly #db: Database;
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.#db = new Database(dbPath);
+    logger.info("Opened SQLite database.", { dbPath });
   }
 
   init(): void {
@@ -159,6 +163,7 @@ export class AppDatabase {
 
     this.#ensureBotRuntimeColumn("account_dashboard_cookie", "TEXT");
     this.#ensureBotRuntimeColumn("account_dashboard_cookie_updated_at", "TEXT");
+    logger.info("Database schema initialized.");
   }
 
   insertInboundSms(message: InboundSms): StoredSmsMessage {
@@ -340,6 +345,7 @@ export class AppDatabase {
       SET last_account_attempt_at = ?
       WHERE singleton_id = 1
     `).run(atIso);
+    logger.debug("Recorded account attempt timestamp.", { atIso });
   }
 
   insertAccountSnapshot(input: {
@@ -412,6 +418,7 @@ export class AppDatabase {
       SET notify_chat_id = ?
       WHERE singleton_id = 1
     `).run(chatId);
+    logger.info("Persisted Telegram notify chat id.", { chatId });
   }
 
   getAccountDashboardCookie(): string | null {
@@ -433,6 +440,10 @@ export class AppDatabase {
         account_dashboard_cookie_updated_at = ?
       WHERE singleton_id = 1
     `).run(cookie, cookie ? updatedAtIso : null);
+    logger.info(cookie ? "Stored dashboard cookie." : "Cleared dashboard cookie.", {
+      updatedAtIso: cookie ? updatedAtIso : null,
+      storedValueLength: cookie?.length ?? 0,
+    });
   }
 
   getAccountDashboardCookieUpdatedAt(): string | null {
@@ -453,6 +464,7 @@ export class AppDatabase {
       RETURNING id
     `).get(jobName, new Date().toISOString()) as { id: number };
 
+    logger.info("Started job run.", { jobName, runId: row.id });
     return row.id;
   }
 
@@ -462,6 +474,12 @@ export class AppDatabase {
       SET finished_at = ?, status = ?, details_json = ?
       WHERE id = ?
     `).run(new Date().toISOString(), status, serializeJson(details), runId);
+    if (status === "failed") {
+      logger.error("Job run finished with failure.", { runId, status, details });
+      return;
+    }
+
+    logger.info("Job run finished.", { runId, status, details });
   }
 
   insertAlert(level: AlertLevel, code: string, message: string, payload?: unknown): void {
@@ -469,10 +487,22 @@ export class AppDatabase {
       INSERT INTO alert_events (level, code, message, created_at, payload_json)
       VALUES (?, ?, ?, ?, ?)
     `).run(level, code, message, new Date().toISOString(), serializeJson(payload));
+    if (level === "error") {
+      logger.error("Stored alert event.", { code, message, payload });
+      return;
+    }
+
+    if (level === "warning") {
+      logger.warn("Stored alert event.", { code, message, payload });
+      return;
+    }
+
+    logger.info("Stored alert event.", { code, message, payload });
   }
 
   close(): void {
     this.#db.close();
+    logger.info("Closed SQLite database.");
   }
 
   #mapSmsRow(row: SmsRow): StoredSmsMessage {

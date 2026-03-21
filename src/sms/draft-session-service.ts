@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { createLogger } from "../logger";
 import { estimateSmsSegments } from "./encoding";
 
 export type SmsDraftMode = "compose" | "reply";
@@ -36,6 +37,8 @@ export interface DraftSessionStore {
   deleteDraft(chatId: string): void;
   pruneExpired(nowIso: string): void;
 }
+
+const logger = createLogger("sms.drafts");
 
 export class InMemoryDraftSessionStore implements DraftSessionStore {
   #items = new Map<string, SmsDraftSession>();
@@ -98,6 +101,10 @@ export class DraftSessionService {
   beginCompose(chatId: string): { created: boolean; session: SmsDraftSession; message: string } {
     const existing = this.getActiveSession(chatId);
     if (existing) {
+      logger.warn("Compose flow requested while a draft is already active.", {
+        chatId,
+        sessionId: existing.sessionId,
+      });
       return {
         created: false,
         session: existing,
@@ -107,6 +114,10 @@ export class DraftSessionService {
 
     const session = this.createSession(chatId, "compose", null, null);
     this.#store.saveDraft(session);
+    logger.info("Created compose SMS draft.", {
+      chatId,
+      sessionId: session.sessionId,
+    });
     return {
       created: true,
       session,
@@ -121,6 +132,10 @@ export class DraftSessionService {
   } {
     const existing = this.getActiveSession(chatId);
     if (existing) {
+      logger.warn("Reply flow requested while a draft is already active.", {
+        chatId,
+        sessionId: existing.sessionId,
+      });
       return {
         created: false,
         session: existing,
@@ -131,6 +146,12 @@ export class DraftSessionService {
     const session = this.createSession(chatId, "reply", remoteNumber, sourceMessageId);
     session.state = "collect_body";
     this.#store.saveDraft(session);
+    logger.info("Created reply SMS draft.", {
+      chatId,
+      sessionId: session.sessionId,
+      remoteNumber,
+      sourceMessageId,
+    });
     return {
       created: true,
       session,
@@ -154,12 +175,22 @@ export class DraftSessionService {
   cancel(chatId: string, sessionId?: string): boolean {
     const existing = this.getActiveSession(chatId);
     if (!existing) {
+      logger.debug("Cancel requested but no active SMS draft exists.", { chatId, sessionId });
       return false;
     }
     if (sessionId && existing.sessionId !== sessionId) {
+      logger.warn("Cancel requested for a stale SMS draft session.", {
+        chatId,
+        requestedSessionId: sessionId,
+        activeSessionId: existing.sessionId,
+      });
       return false;
     }
     this.#store.deleteDraft(chatId);
+    logger.info("Cancelled SMS draft.", {
+      chatId,
+      sessionId: existing.sessionId,
+    });
     return true;
   }
 
@@ -169,6 +200,11 @@ export class DraftSessionService {
       return { ok: false, session: null, message: "当前没有活动中的短信草稿。" };
     }
     if (session.sessionId !== sessionId) {
+      logger.warn("Preview advance requested for a stale SMS draft.", {
+        chatId,
+        requestedSessionId: sessionId,
+        activeSessionId: session.sessionId,
+      });
       return { ok: false, session, message: "当前按钮对应的草稿已失效，请重新开始。" };
     }
     if (session.state !== "preview") {
@@ -180,6 +216,10 @@ export class DraftSessionService {
       state: "password",
     });
     this.#store.saveDraft(updated);
+    logger.info("SMS draft advanced to password state.", {
+      chatId,
+      sessionId: updated.sessionId,
+    });
     return {
       ok: true,
       session: updated,
@@ -204,6 +244,10 @@ export class DraftSessionService {
     if (input !== this.#password) {
       const updated = this.touch(session);
       this.#store.saveDraft(updated);
+      logger.warn("SMS draft password validation failed.", {
+        chatId,
+        sessionId: updated.sessionId,
+      });
       return {
         type: "password_invalid",
         session: updated,
@@ -217,6 +261,10 @@ export class DraftSessionService {
       state: "confirm",
     });
     this.#store.saveDraft(updated);
+    logger.info("SMS draft password validated.", {
+      chatId,
+      sessionId: updated.sessionId,
+    });
     return {
       type: "password_valid",
       session: updated,
@@ -244,6 +292,11 @@ export class DraftSessionService {
         state: "collect_body",
       });
       this.#store.saveDraft(updated);
+      logger.info("SMS draft recipient recorded.", {
+        chatId,
+        sessionId: updated.sessionId,
+        remoteNumber: updated.remoteNumber,
+      });
       return {
         type: "recipient_collected",
         session: updated,
@@ -266,6 +319,11 @@ export class DraftSessionService {
         state: "preview",
       });
       this.#store.saveDraft(updated);
+      logger.info("SMS draft body recorded.", {
+        chatId,
+        sessionId: updated.sessionId,
+        bodyLength: body.length,
+      });
       return {
         type: "body_collected",
         session: updated,
@@ -298,7 +356,12 @@ export class DraftSessionService {
   }
 
   complete(chatId: string): void {
+    const active = this.getActiveSession(chatId);
     this.#store.deleteDraft(chatId);
+    logger.info("Completed SMS draft.", {
+      chatId,
+      sessionId: active?.sessionId ?? null,
+    });
   }
 
   createSession(chatId: string, mode: SmsDraftMode, remoteNumber: string | null, sourceMessageId: number | null): SmsDraftSession {

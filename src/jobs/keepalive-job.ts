@@ -1,5 +1,8 @@
+import { createLogger } from "../logger";
 import type { ModemProvider } from "../modem/types";
 import type { AppDatabase } from "../storage/database";
+
+const logger = createLogger("keepalive");
 
 export class KeepaliveJob {
   #running = false;
@@ -22,11 +25,17 @@ export class KeepaliveJob {
 
   async run(): Promise<{ ok: true; message: string } | { ok: false; message: string }> {
     if (this.#running) {
+      logger.warn("Keepalive job skipped because another run is in progress.");
       return { ok: false, message: "保号任务正在执行中，请稍后再试。" };
     }
 
     this.#running = true;
     const runId = this.#database.startJobRun("keepalive");
+    logger.info("Keepalive job started.", {
+      keepaliveUrl: this.#keepaliveUrl,
+      timeoutMs: this.#timeoutMs,
+      runId,
+    });
     try {
       const result = await this.#modem.performKeepaliveRequest(this.#keepaliveUrl, this.#timeoutMs);
       const message = `保号动作执行完成，HTTP ${result.httpStatus}，${result.protocol.toUpperCase()}，${result.responseLength} bytes。`;
@@ -36,6 +45,12 @@ export class KeepaliveJob {
         protocol: result.protocol,
         responseLength: result.responseLength,
         keepaliveUrl: this.#keepaliveUrl,
+      });
+      logger.info("Keepalive job completed.", {
+        runId,
+        httpStatus: result.httpStatus,
+        protocol: result.protocol,
+        responseLength: result.responseLength,
       });
       return { ok: true, message };
     } catch (error) {
@@ -47,6 +62,11 @@ export class KeepaliveJob {
       });
       this.#database.insertAlert("error", "keepalive_failed", "保号动作执行失败。", {
         error: message,
+      });
+      logger.error("Keepalive job failed.", {
+        runId,
+        error,
+        keepaliveUrl: this.#keepaliveUrl,
       });
       return { ok: false, message: `保号动作失败: ${message}` };
     } finally {

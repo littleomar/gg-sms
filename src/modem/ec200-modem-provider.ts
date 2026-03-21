@@ -8,6 +8,7 @@ import {
   type WriteStream,
 } from "node:fs";
 
+import { createLogger } from "../logger";
 import type {
   InboundSms,
   KeepaliveRequestResult,
@@ -20,6 +21,7 @@ import type {
 const CTRL_Z = String.fromCharCode(26);
 const KEEPALIVE_CONTEXT_ID = 2;
 const KEEPALIVE_SSL_CONTEXT_ID = 1;
+const logger = createLogger("modem.ec200");
 
 type PendingResponse = {
   command: string;
@@ -160,6 +162,10 @@ export class Ec200ModemProvider implements ModemProvider {
   async start(onInboundSms: (message: InboundSms) => Promise<void> | void): Promise<void> {
     this.#onInboundSms = onInboundSms;
     try {
+      logger.info("Opening modem serial connection.", {
+        portPath: this.#portPath,
+        baudRate: this.#baudRate,
+      });
       await this.#configurePort();
 
       this.#readFd = openSync(this.#portPath, "r");
@@ -193,7 +199,11 @@ export class Ec200ModemProvider implements ModemProvider {
 
       await this.#initializeModem();
       await this.#refreshStatus();
+      logger.info("Modem initialization completed.", {
+        portPath: this.#portPath,
+      });
     } catch (error) {
+      logger.error("Modem start failed.", { error, portPath: this.#portPath });
       await this.stop();
       throw error;
     }
@@ -223,6 +233,7 @@ export class Ec200ModemProvider implements ModemProvider {
       return;
     }
 
+    logger.info("Closing modem serial connection.", { portPath: this.#portPath });
     this.#abortPendingOperations(new Error("Modem serial port closed"));
     this.#busyOperation = null;
 
@@ -310,8 +321,14 @@ export class Ec200ModemProvider implements ModemProvider {
 
   async performKeepaliveRequest(url: string, timeoutMs: number): Promise<KeepaliveRequestResult> {
     this.#busyOperation = "keepalive";
+    logger.info("Starting modem-side keepalive request.", {
+      url,
+      timeoutMs,
+    });
     try {
-      return await this.#enqueue(() => this.#performKeepaliveRequestInternal(url, timeoutMs));
+      const result = await this.#enqueue(() => this.#performKeepaliveRequestInternal(url, timeoutMs));
+      logger.info("Modem-side keepalive request completed.", result);
+      return result;
     } finally {
       this.#busyOperation = null;
     }
@@ -423,13 +440,10 @@ export class Ec200ModemProvider implements ModemProvider {
     }
 
     if (failures.length > 0) {
-      console.warn(
-        [
-          `Warning: some stty options could not be applied to ${this.#portPath}.`,
-          "The modem may still work if the serial defaults already match the module.",
-          ...failures.map((failure) => `- ${failure}`),
-        ].join("\n"),
-      );
+      logger.warn("Some stty options could not be applied.", {
+        portPath: this.#portPath,
+        failures,
+      });
     }
   }
 
@@ -438,7 +452,7 @@ export class Ec200ModemProvider implements ModemProvider {
       return;
     }
 
-    console.log(`[MODEM] ${message}${details ? `: ${details}` : ""}`);
+    logger.debug(message, details ? { details } : undefined);
   }
 
   #markDisconnected(): void {
@@ -450,6 +464,7 @@ export class Ec200ModemProvider implements ModemProvider {
   }
 
   #handleTransportFailure(message: string): void {
+    logger.error("Modem transport failure detected.", { message, portPath: this.#portPath });
     this.#markDisconnected();
     this.#abortPendingOperations(new Error(message));
   }
@@ -612,7 +627,12 @@ export class Ec200ModemProvider implements ModemProvider {
       });
     } catch (error) {
       const details = error instanceof Error ? error.message : "unknown error";
-      console.error(`Failed to process inbound SMS at index ${index}: ${details}`);
+      logger.error("Failed to process inbound SMS.", {
+        error,
+        index,
+        source,
+        details,
+      });
     }
   }
 

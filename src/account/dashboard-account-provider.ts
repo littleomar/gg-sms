@@ -1,4 +1,5 @@
 import type { AccountProvider, AccountSummary } from "./provider";
+import { createLogger } from "../logger";
 import type { AppDatabase } from "../storage/database";
 
 const DEFAULT_DASHBOARD_URL = "https://www.giffgaff.com/dashboard";
@@ -6,6 +7,7 @@ const DEFAULT_ACCEPT_LANGUAGE = "en-GB,en;q=0.9";
 const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const CREDIT_DEADLINE_DAYS = 180;
+const logger = createLogger("account.dashboard");
 
 function decodeHtmlEntities(value: string): string {
   return value
@@ -71,6 +73,7 @@ export class DashboardAccountProvider implements AccountProvider {
 
     if (options.bootstrapCookie && !this.#database.getAccountDashboardCookie()) {
       this.#database.setAccountDashboardCookie(options.bootstrapCookie);
+      logger.info("Bootstrapped dashboard cookie from configuration.");
     }
   }
 
@@ -89,15 +92,22 @@ export class DashboardAccountProvider implements AccountProvider {
   }
 
   async recordAttempt(): Promise<void> {
-    this.#database.recordAccountAttempt(new Date().toISOString());
+    const attemptAt = new Date().toISOString();
+    this.#database.recordAccountAttempt(attemptAt);
+    logger.debug("Recorded dashboard account attempt.", { attemptAt });
   }
 
   async refresh(): Promise<AccountSummary> {
     const cookie = this.#database.getAccountDashboardCookie();
     if (!cookie) {
+      logger.warn("Dashboard refresh requested without a configured cookie.");
       throw new Error("Dashboard cookie is not configured. 请先使用 /accountcookie <cookie> 设置。");
     }
 
+    logger.info("Refreshing dashboard account summary.", {
+      dashboardUrl: this.#dashboardUrl,
+      dashboardSessionUpdatedAt: this.#database.getAccountDashboardCookieUpdatedAt(),
+    });
     const response = await fetch(this.#dashboardUrl, {
       headers: {
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -113,12 +123,19 @@ export class DashboardAccountProvider implements AccountProvider {
     });
 
     if (!response.ok) {
+      logger.warn("Dashboard request returned a non-OK response.", {
+        status: response.status,
+        url: response.url || this.#dashboardUrl,
+      });
       throw new Error(`Dashboard request failed with HTTP ${response.status}`);
     }
 
     const html = await response.text();
     const airtimeCredit = extractAirtimeCreditFromDashboard(html);
     if (!airtimeCredit) {
+      logger.warn("Dashboard refresh could not extract airtime credit.", {
+        dashboardUrl: response.url || this.#dashboardUrl,
+      });
       throw new Error("Could not find the dashboard credit balance. The cookie may be expired or the page structure changed.");
     }
 
@@ -155,6 +172,14 @@ export class DashboardAccountProvider implements AccountProvider {
       lastBalanceChangeAt,
       nextKeepaliveDeadlineAt,
       trackingStatus,
+    });
+
+    logger.info("Dashboard account summary refreshed.", {
+      airtimeCredit,
+      fetchedAt,
+      trackingStatus,
+      lastBalanceChangeAt,
+      nextKeepaliveDeadlineAt,
     });
 
     return this.getSummary();

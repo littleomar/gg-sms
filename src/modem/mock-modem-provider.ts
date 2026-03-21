@@ -1,3 +1,4 @@
+import { createLogger } from "../logger";
 import type {
   InboundSms,
   KeepaliveRequestResult,
@@ -6,6 +7,8 @@ import type {
   OutboundSmsInput,
   OutboundSmsResult,
 } from "./types";
+
+const logger = createLogger("modem.mock");
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -35,17 +38,21 @@ export class MockModemProvider implements ModemProvider {
 
   async start(onInboundSms: (message: InboundSms) => Promise<void> | void): Promise<void> {
     this.#onInboundSms = onInboundSms;
+    logger.info("Mock modem started.");
   }
 
   async drainInbox(): Promise<void> {
     const pending = [...this.#pendingInbox];
     this.#pendingInbox = [];
+    logger.info("Mock modem draining inbox.", { count: pending.length });
     for (const message of pending) {
       await this.#onInboundSms?.(message);
     }
   }
 
-  async stop(): Promise<void> {}
+  async stop(): Promise<void> {
+    logger.info("Mock modem stopped.");
+  }
 
   async getStatus(): Promise<ModemStatus> {
     return this.#status;
@@ -63,12 +70,18 @@ export class MockModemProvider implements ModemProvider {
       ipAddress: enabled ? "10.0.0.2" : null,
       lastUpdatedAt: nowIso(),
     };
+    logger.info("Mock modem data state updated.", { enabled });
   }
 
   async waitForDataReady(): Promise<void> {}
 
   async sendSms(input: OutboundSmsInput): Promise<OutboundSmsResult> {
     this.sentMessages.push(input);
+    logger.info("Mock modem sent SMS.", {
+      remoteNumber: input.remoteNumber,
+      bodyLength: input.body.length,
+      sessionId: input.sessionId ?? null,
+    });
     return {
       modemMessageId: `${this.sentMessages.length}`,
       sentAt: nowIso(),
@@ -78,6 +91,7 @@ export class MockModemProvider implements ModemProvider {
   async performKeepaliveRequest(url: string, timeoutMs: number): Promise<KeepaliveRequestResult> {
     this.keepaliveRequests.push({ url, timeoutMs });
     this.#busy = true;
+    logger.info("Mock modem keepalive started.", { url, timeoutMs });
     this.#status = {
       ...this.#status,
       dataAttached: true,
@@ -98,6 +112,7 @@ export class MockModemProvider implements ModemProvider {
       };
     } finally {
       this.#busy = false;
+      logger.info("Mock modem keepalive finished.", { url });
       this.#status = {
         ...this.#status,
         dataAttached: false,

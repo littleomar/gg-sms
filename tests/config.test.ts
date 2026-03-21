@@ -21,6 +21,7 @@ describe("loadConfig", () => {
     const config = loadConfig(baseEnv());
 
     expect(config.smsPollIntervalMs).toBe(15_000);
+    expect(config.logLevel).toBe("info");
   });
 
   test("allows overriding the inbox poll interval", () => {
@@ -33,5 +34,11 @@ describe("loadConfig", () => {
     const config = loadConfig(baseEnv({ SMS_POLL_INTERVAL_MS: "0" }));
 
     expect(config.smsPollIntervalMs).toBe(0);
+  });
+
+  test("allows overriding the log level", () => {
+    const config = loadConfig(baseEnv({ LOG_LEVEL: "debug" }));
+
+    expect(config.logLevel).toBe("debug");
   });
 });

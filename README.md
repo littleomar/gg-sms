@@ -47,6 +47,7 @@ bun test
 - `BOT_TOKEN`: Telegram bot token
 - `BOT_ADMIN_ID`: 唯一允许操作 bot 的 Telegram user/chat id
 - `BOT_NOTIFY_CHAT_ID`: 主动推送短信和告警的目标 chat id；不填时默认沿用管理员最近一次实际使用 bot 的 chat
+- `LOG_LEVEL`: 全局日志级别，支持 `debug`、`info`、`warn`、`error`，默认 `info`
 - `TELEGRAM_PROXY_URL`: Telegram 出口代理地址，支持 `http://`、`https://`、`socks://`、`socks5://` 等 URL；中国大陆环境下通常需要配置
 - `GG_DASHBOARD_COOKIE`: giffgaff dashboard 登录后的完整 Cookie 串；只用于 `/account`，不要提交到 git
 - `GG_DASHBOARD_URL`: dashboard 页面地址，默认 `https://www.giffgaff.com/dashboard`
@@ -71,6 +72,7 @@ bun test
 ## 本地开发提示
 
 - 如果你只想先调试 bot 和流程，可以把 `MODEM_PORT=mock`，这会启用内置的 mock modem，不依赖真实硬件。
+- 如果需要更详细的运行日志，可以把 `LOG_LEVEL=debug`；如果还要看原始 AT 收发，再额外设置 `MODEM_DEBUG=1`。
 - 如果宿主机无法直连 Telegram Bot API，请配置 `TELEGRAM_PROXY_URL`，例如 `socks5://127.0.0.1:7890`。
 - 如果怀疑短信没有被读取到，可以临时设置 `MODEM_DEBUG=1`，再观察是否出现 `+CMTI`、`AT+CMGR`、启动时 inbox scan，以及后台轮询日志。
 - 如果你想直接在 TG 里更新 dashboard 登录态，可以发送 `/accountcookie <cookie>`；bot 会尽量删除原始消息，降低 cookie 暴露时间。

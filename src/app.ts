@@ -3,6 +3,7 @@ import type { AccountProvider } from "./account/provider";
 import type { AppConfig } from "./config";
 import { TelegramBotService } from "./bot/telegram-bot";
 import { KeepaliveJob } from "./jobs/keepalive-job";
+import { createLogger } from "./logger";
 import { Ec200ModemProvider } from "./modem/ec200-modem-provider";
 import { MockModemProvider } from "./modem/mock-modem-provider";
 import type { ModemProvider } from "./modem/types";
@@ -11,6 +12,7 @@ import { AppDatabase, DatabaseDraftSessionStore } from "./storage/database";
 
 const STARTUP_STEP_TIMEOUT_MS = 30_000;
 const COMPONENT_RETRY_DELAY_MS = 30_000;
+const logger = createLogger("app");
 
 async function withTimeout<T>(label: string, operation: Promise<T>, timeoutMs = STARTUP_STEP_TIMEOUT_MS): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -102,6 +104,7 @@ export class GgSmsApp {
 
   async start(): Promise<void> {
     this.#stopping = false;
+    logger.info("Application start requested.");
 
     await Promise.allSettled([
       this.#ensureBotStarted("startup"),
@@ -109,12 +112,15 @@ export class GgSmsApp {
     ]);
 
     if (this.#config.smsPollIntervalMs > 0) {
-      console.log(`Starting background inbox polling every ${this.#config.smsPollIntervalMs}ms...`);
+      logger.info("Starting background inbox polling.", {
+        intervalMs: this.#config.smsPollIntervalMs,
+      });
       this.#scheduleSmsPoll();
     }
   }
 
   async stop(): Promise<void> {
+    logger.info("Application stop requested.");
     this.#stopping = true;
     this.#botStarted = false;
     this.#modemStarted = false;
@@ -140,6 +146,7 @@ export class GgSmsApp {
       this.#modem.stop(),
     ]);
     this.#database.close();
+    logger.info("Application resources closed.");
   }
 
   #scheduleSmsPoll(): void {
@@ -160,6 +167,7 @@ export class GgSmsApp {
     }
 
     if (this.#modem.isBusy()) {
+      logger.debug("Skipping inbox poll because modem is busy.");
       return;
     }
 
@@ -185,17 +193,17 @@ export class GgSmsApp {
 
     this.#botStarting = true;
     try {
-      console.log(reason === "startup" ? "Starting Telegram bot..." : "Retrying Telegram bot startup...");
+      logger.info(reason === "startup" ? "Starting Telegram bot." : "Retrying Telegram bot startup.");
       await withTimeout("Telegram bot startup", this.#bot.start());
       this.#botStarted = true;
       if (this.#botRetryTimer) {
         clearTimeout(this.#botRetryTimer);
         this.#botRetryTimer = null;
       }
-      console.log("Telegram bot started.");
+      logger.info("Telegram bot started.");
     } catch (error) {
       const details = error instanceof Error ? error.message : String(error);
-      console.error(`Telegram bot startup failed: ${details}`);
+      logger.error("Telegram bot startup failed.", { error });
       this.#database.insertAlert("warning", "telegram_start_failed", "Telegram bot startup failed.", {
         error: details,
       });
@@ -213,14 +221,20 @@ export class GgSmsApp {
 
     this.#modemStarting = true;
     try {
-      console.log(reason === "startup" ? `Starting modem on ${this.#config.modemPort}...` : `Retrying modem on ${this.#config.modemPort}...`);
+      logger.info(reason === "startup" ? "Starting modem." : "Retrying modem startup.", {
+        modemPort: this.#config.modemPort,
+      });
       await withTimeout("Modem startup", this.#modem.start(async (message) => {
         const storedMessage = this.#database.insertInboundSms(message);
         try {
           await this.#bot.pushInboundSms(storedMessage.id);
         } catch (error) {
           const details = error instanceof Error ? error.message : String(error);
-          console.error(`Failed to push inbound SMS ${storedMessage.id} to Telegram: ${details}`);
+          logger.error("Failed to push inbound SMS to Telegram.", {
+            error,
+            messageId: storedMessage.id,
+            remoteNumber: storedMessage.remoteNumber,
+          });
           this.#database.insertAlert("error", "sms_push_failed", "Inbound SMS push to Telegram failed.", {
             messageId: storedMessage.id,
             remoteNumber: storedMessage.remoteNumber,
@@ -234,7 +248,9 @@ export class GgSmsApp {
         clearTimeout(this.#modemRetryTimer);
         this.#modemRetryTimer = null;
       }
-      console.log("Modem started.");
+      logger.info("Modem started.", {
+        modemPort: this.#config.modemPort,
+      });
       await this.#scanInboxAfterStartup();
     } catch (error) {
       await this.#handleModemFailure(error, "Modem startup failed.", "modem_start_failed");
@@ -245,12 +261,12 @@ export class GgSmsApp {
 
   async #scanInboxAfterStartup(): Promise<void> {
     try {
-      console.log("Scanning modem inbox for unread SMS...");
+      logger.info("Scanning modem inbox for unread SMS.");
       await withTimeout("Modem inbox scan", this.#modem.drainInbox());
-      console.log("Modem inbox scan completed.");
+      logger.info("Modem inbox scan completed.");
     } catch (error) {
       const details = error instanceof Error ? error.message : String(error);
-      console.error(`Failed to drain modem inbox during startup: ${details}`);
+      logger.warn("Failed to drain modem inbox during startup.", { error });
       this.#database.insertAlert("warning", "sms_drain_failed", "Startup inbox scan failed.", {
         error: details,
       });
@@ -272,7 +288,7 @@ export class GgSmsApp {
 
   async #handleModemFailure(error: unknown, message: string, code: string): Promise<void> {
     const details = error instanceof Error ? error.message : String(error);
-    console.error(`${message} ${details}`);
+    logger.error(message, { error });
     this.#database.insertAlert("warning", code, message, {
       error: details,
     });
@@ -286,7 +302,9 @@ export class GgSmsApp {
       return;
     }
 
-    console.log(`Telegram bot will retry in ${COMPONENT_RETRY_DELAY_MS}ms.`);
+    logger.warn("Telegram bot retry scheduled.", {
+      retryInMs: COMPONENT_RETRY_DELAY_MS,
+    });
     this.#botRetryTimer = setTimeout(() => {
       this.#botRetryTimer = null;
       void this.#ensureBotStarted("retry");
@@ -298,7 +316,9 @@ export class GgSmsApp {
       return;
     }
 
-    console.log(`Modem will retry in ${COMPONENT_RETRY_DELAY_MS}ms.`);
+    logger.warn("Modem retry scheduled.", {
+      retryInMs: COMPONENT_RETRY_DELAY_MS,
+    });
     this.#modemRetryTimer = setTimeout(() => {
       this.#modemRetryTimer = null;
       void this.#ensureModemStarted("retry");

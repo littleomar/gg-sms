@@ -1,5 +1,8 @@
 import type { AccountProvider, AccountSummary } from "./provider";
+import { createLogger } from "../logger";
 import type { AppDatabase } from "../storage/database";
+
+const logger = createLogger("account.placeholder");
 
 export class NotImplementedAccountProvider implements AccountProvider {
   readonly #database: AppDatabase;
@@ -21,10 +24,13 @@ export class NotImplementedAccountProvider implements AccountProvider {
   }
 
   async recordAttempt(): Promise<void> {
-    this.#database.recordAccountAttempt(new Date().toISOString());
+    const attemptAt = new Date().toISOString();
+    this.#database.recordAccountAttempt(attemptAt);
+    logger.debug("Recorded placeholder account attempt.", { attemptAt });
   }
 
   async refresh(): Promise<AccountSummary> {
+    logger.info("Placeholder account refresh requested.");
     return this.getSummary();
   }
 }

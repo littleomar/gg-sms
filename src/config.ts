@@ -1,4 +1,7 @@
+import { parseLogLevel, type LogLevel } from "./logger";
+
 export type AppConfig = {
+  logLevel: LogLevel;
   botToken: string;
   botAdminId: string;
   botNotifyChatId?: string;
@@ -70,6 +73,7 @@ function parseNumber(
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
   return {
+    logLevel: parseLogLevel(env.LOG_LEVEL, "info"),
     botToken: requireEnv("BOT_TOKEN", env),
     botAdminId: requireEnv("BOT_ADMIN_ID", env),
     botNotifyChatId: parseOptional("BOT_NOTIFY_CHAT_ID", env),

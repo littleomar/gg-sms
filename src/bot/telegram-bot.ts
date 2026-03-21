@@ -2,6 +2,7 @@ import { Markup, Telegraf, type Context } from "telegraf";
 
 import type { AccountProvider } from "../account/provider";
 import type { KeepaliveJob } from "../jobs/keepalive-job";
+import { createLogger } from "../logger";
 import type { ModemProvider } from "../modem/types";
 import { createTelegramProxyAgent } from "./proxy-agent";
 import { isAdminUser } from "./auth";
@@ -20,6 +21,7 @@ const BOT_MENU_COMMANDS = [
   { command: "account", description: "刷新并查看账户信息" },
   { command: "accountcookie", description: "设置 giffgaff dashboard cookie" },
 ] as const;
+const logger = createLogger("bot.telegram");
 
 function escapeHtml(input: string): string {
   return input
@@ -189,7 +191,12 @@ export class TelegramBotService {
 
     this.#bot.catch(async (error, ctx) => {
       const details = error instanceof Error ? error.message : String(error);
-      console.error(`Telegram handler failed: ${details}`);
+      logger.error("Telegram handler failed.", {
+        error,
+        updateType: ctx.updateType,
+        chatId: ctx.chat?.id,
+        userId: ctx.from?.id,
+      });
       this.#database.insertAlert("error", "telegram_handler_failed", "Telegram handler failed.", {
         error: details,
         updateType: ctx.updateType,
@@ -208,6 +215,7 @@ export class TelegramBotService {
   }
 
   async start(): Promise<void> {
+    logger.info("Starting Telegram bot service.");
     const botInfo = await this.#bot.telegram.getMe();
     this.#bot.botInfo = botInfo;
     await this.#bot.telegram.deleteWebhook();
@@ -221,8 +229,12 @@ export class TelegramBotService {
     const internalBot = this.#bot as any;
     this.#pollingTask = (internalBot.startPolling as (allowedUpdates?: string[]) => Promise<void>)([]).catch((error: unknown) => {
       const runtimeError = error instanceof Error ? error : new Error(String(error));
-      console.error(`Telegram polling stopped: ${runtimeError.message}`);
+      logger.error("Telegram polling stopped unexpectedly.", { error: runtimeError });
       this.#onRuntimeError?.(runtimeError);
+    });
+    logger.info("Telegram bot polling started.", {
+      botUsername: botInfo.username,
+      notifyChatId: this.#notifyChatId,
     });
   }
 
@@ -237,11 +249,13 @@ export class TelegramBotService {
     }
 
     this.#pollingTask = null;
+    logger.info("Telegram bot stopped.", { reason });
   }
 
   async pushInboundSms(messageId: number): Promise<void> {
     const message = this.#database.getSmsById(messageId);
     if (!message) {
+      logger.warn("Attempted to push an SMS that does not exist in storage.", { messageId });
       return;
     }
 
@@ -257,16 +271,29 @@ export class TelegramBotService {
         Markup.button.callback("Reply", `sms:reply:${message.id}`),
       ]).reply_markup,
     });
+    logger.info("Inbound SMS pushed to Telegram.", {
+      messageId,
+      notifyChatId: this.#notifyChatId,
+      remoteNumber: message.remoteNumber,
+    });
   }
 
   async pushAlert(title: string, body: string): Promise<void> {
     await this.#bot.telegram.sendMessage(this.#notifyChatId, `${title}\n${body}`);
+    logger.warn("Alert pushed to Telegram.", {
+      notifyChatId: this.#notifyChatId,
+      title,
+    });
   }
 
   #registerHandlers(): void {
     this.#bot.use(async (ctx, next) => {
       const userId = ctx.from?.id;
       if (!isAdminUser(userId, this.#adminId)) {
+        logger.warn("Rejected unauthorized Telegram access.", {
+          userId,
+          chatId: ctx.chat?.id,
+        });
         if ("reply" in ctx) {
           await ctx.reply("未授权访问。");
         }
@@ -277,6 +304,7 @@ export class TelegramBotService {
       if (currentChatId !== this.#notifyChatId) {
         this.#notifyChatId = currentChatId;
         this.#database.setNotifyChatId(currentChatId);
+        logger.info("Updated Telegram notify chat.", { notifyChatId: currentChatId });
       }
 
       await next();
@@ -287,6 +315,7 @@ export class TelegramBotService {
     });
 
     this.#bot.command("status", async (ctx) => {
+      logger.info("Handling /status command.", { chatId: ctx.chat?.id });
       const [modemStatus, accountSummary] = await Promise.all([
         this.#modem.getStatus(),
         this.#accountProvider.getSummary(),
@@ -302,16 +331,22 @@ export class TelegramBotService {
         return;
       }
 
+      logger.info("Handling /data command.", {
+        action,
+        chatId: ctx.chat?.id,
+      });
       await this.#modem.setDataEnabled(action === "on");
       await ctx.reply(`数据会话已${action === "on" ? "打开" : "关闭"}。`);
     });
 
     this.#bot.command("keepalive", async (ctx) => {
+      logger.info("Handling /keepalive command.", { chatId: ctx.chat?.id });
       const result = await this.#keepaliveJob.run();
       await ctx.reply(result.message);
     });
 
     this.#bot.command("account", async (ctx) => {
+      logger.info("Handling /account command.", { chatId: ctx.chat?.id });
       await this.#accountProvider.recordAttempt();
 
       try {
@@ -346,12 +381,17 @@ export class TelegramBotService {
 
       if (rawCookie.toLowerCase() === "clear") {
         this.#database.setAccountDashboardCookie(null);
+        logger.info("Cleared dashboard cookie from Telegram command.", { chatId: ctx.chat?.id });
         await safeDeleteMessage(ctx);
         await ctx.reply("dashboard cookie 已清除。");
         return;
       }
 
       this.#database.setAccountDashboardCookie(rawCookie);
+      logger.info("Updated dashboard cookie from Telegram command.", {
+        chatId: ctx.chat?.id,
+        cookieLength: rawCookie.length,
+      });
       await safeDeleteMessage(ctx);
 
       try {
@@ -381,6 +421,12 @@ export class TelegramBotService {
           return;
         }
 
+        logger.info("Handling /sms inbox command.", {
+          chatId: ctx.chat?.id,
+          limit,
+          count: messages.length,
+        });
+
         const lines = ["最近短信"];
         for (const message of messages) {
           const prefix = message.direction === "inbound" ? "IN" : "OUT";
@@ -394,6 +440,11 @@ export class TelegramBotService {
       }
 
       const result = this.#drafts.beginCompose(String(ctx.chat?.id ?? this.#adminId));
+      logger.info("Started compose SMS flow.", {
+        chatId: ctx.chat?.id,
+        created: result.created,
+        sessionId: result.session.sessionId,
+      });
       await ctx.reply(result.message);
     });
 
@@ -413,6 +464,12 @@ export class TelegramBotService {
         }
 
         const result = this.#drafts.beginReply(String(ctx.chat?.id ?? this.#adminId), message.remoteNumber, message.id);
+        logger.info("Started reply SMS flow.", {
+          chatId: ctx.chat?.id,
+          created: result.created,
+          sessionId: result.session.sessionId,
+          sourceMessageId: message.id,
+        });
         await ctx.answerCbQuery(result.created ? "已进入回复模式" : "已有进行中的草稿");
         await ctx.reply(result.message);
         return;
@@ -422,6 +479,11 @@ export class TelegramBotService {
 
       if (callback.action === "preview") {
         const result = this.#drafts.advancePreview(chatId, callback.value);
+        logger.info("Advanced SMS draft to password step.", {
+          chatId,
+          sessionId: callback.value,
+          ok: result.ok,
+        });
         await ctx.answerCbQuery(result.ok ? "进入验密" : "无法继续");
         await ctx.reply(result.message);
         return;
@@ -429,6 +491,11 @@ export class TelegramBotService {
 
       if (callback.action === "cancel") {
         const cancelled = this.#drafts.cancel(chatId, callback.value);
+        logger.info("Cancelled SMS draft.", {
+          chatId,
+          sessionId: callback.value,
+          cancelled,
+        });
         await ctx.answerCbQuery(cancelled ? "已取消草稿" : "没有活动草稿");
         await ctx.reply(cancelled ? "短信草稿已取消。" : "当前没有活动中的短信草稿。");
         return;
@@ -443,6 +510,11 @@ export class TelegramBotService {
         }
 
         try {
+          logger.info("Sending outbound SMS.", {
+            chatId,
+            sessionId: result.session.sessionId,
+            remoteNumber: result.session.remoteNumber,
+          });
           const outbound = await this.#modem.sendSms({
             remoteNumber: result.session.remoteNumber!,
             body: result.session.body!,
@@ -459,6 +531,13 @@ export class TelegramBotService {
           });
           this.#drafts.complete(chatId);
 
+          logger.info("Outbound SMS sent.", {
+            chatId,
+            sessionId: result.session.sessionId,
+            remoteNumber: result.session.remoteNumber,
+            modemMessageId: outbound.modemMessageId,
+          });
+
           await ctx.answerCbQuery("短信已发送");
           await ctx.reply(`短信已发送到 ${result.session.remoteNumber}。`);
         } catch (error) {
@@ -472,6 +551,12 @@ export class TelegramBotService {
           });
           this.#database.insertAlert("error", "sms_send_failed", "短信发送失败。", {
             error: message,
+            remoteNumber: result.session.remoteNumber,
+          });
+          logger.error("Outbound SMS failed.", {
+            error,
+            chatId,
+            sessionId: result.session.sessionId,
             remoteNumber: result.session.remoteNumber,
           });
 
@@ -497,6 +582,13 @@ export class TelegramBotService {
       if (activeSession.state === "password") {
         await safeDeleteMessage(ctx);
       }
+
+      logger.debug("Handled SMS draft text input.", {
+        chatId,
+        sessionId: activeSession.sessionId,
+        previousState: activeSession.state,
+        resultType: result.type,
+      });
 
       switch (result.type) {
         case "recipient_collected":
