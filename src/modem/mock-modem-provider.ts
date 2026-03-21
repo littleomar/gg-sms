@@ -11,6 +11,7 @@ export class MockModemProvider implements ModemProvider {
     connected: true,
     simReady: true,
     registered: true,
+    phoneNumber: "+447700900123",
     operatorName: "Mock Carrier",
     signalQuality: 25,
     smsReady: true,

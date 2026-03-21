@@ -5,6 +5,7 @@ export type ModemStatus = {
   connected: boolean;
   simReady: boolean;
   registered: boolean;
+  phoneNumber?: string | null;
   operatorName?: string | null;
   signalQuality?: number | null;
   smsReady: boolean;

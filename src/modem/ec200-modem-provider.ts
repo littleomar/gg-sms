@@ -104,6 +104,7 @@ export class Ec200ModemProvider implements ModemProvider {
     connected: false,
     simReady: false,
     registered: false,
+    phoneNumber: null,
     operatorName: null,
     signalQuality: null,
     smsReady: false,
@@ -136,39 +137,44 @@ export class Ec200ModemProvider implements ModemProvider {
 
   async start(onInboundSms: (message: InboundSms) => Promise<void> | void): Promise<void> {
     this.#onInboundSms = onInboundSms;
-    await this.#configurePort();
+    try {
+      await this.#configurePort();
 
-    this.#readFd = openSync(this.#portPath, "r");
-    this.#writeFd = openSync(this.#portPath, "r+");
-    this.#readStream = createReadStream(this.#portPath, {
-      fd: this.#readFd,
-      autoClose: false,
-      encoding: "utf8",
-    });
-    this.#writeStream = createWriteStream(this.#portPath, {
-      fd: this.#writeFd,
-      autoClose: false,
-      encoding: "utf8",
-    });
+      this.#readFd = openSync(this.#portPath, "r");
+      this.#writeFd = openSync(this.#portPath, "r+");
+      this.#readStream = createReadStream(this.#portPath, {
+        fd: this.#readFd,
+        autoClose: false,
+        encoding: "utf8",
+      });
+      this.#writeStream = createWriteStream(this.#portPath, {
+        fd: this.#writeFd,
+        autoClose: false,
+        encoding: "utf8",
+      });
 
-    this.#readStream.on("data", (chunk: string | Buffer) =>
-      this.#handleChunk(typeof chunk === "string" ? chunk : chunk.toString("utf8")),
-    );
-    this.#readStream.on("error", () => {
-      this.#markDisconnected();
-    });
-    this.#writeStream.on("error", () => {
-      this.#markDisconnected();
-    });
+      this.#readStream.on("data", (chunk: string | Buffer) =>
+        this.#handleChunk(typeof chunk === "string" ? chunk : chunk.toString("utf8")),
+      );
+      this.#readStream.on("error", () => {
+        this.#markDisconnected();
+      });
+      this.#writeStream.on("error", () => {
+        this.#markDisconnected();
+      });
 
-    this.#status = {
-      ...this.#status,
-      connected: true,
-      lastUpdatedAt: nowIso(),
-    };
+      this.#status = {
+        ...this.#status,
+        connected: true,
+        lastUpdatedAt: nowIso(),
+      };
 
-    await this.#initializeModem();
-    await this.#refreshStatus();
+      await this.#initializeModem();
+      await this.#refreshStatus();
+    } catch (error) {
+      await this.stop();
+      throw error;
+    }
   }
 
   async drainInbox(): Promise<void> {
@@ -218,7 +224,13 @@ export class Ec200ModemProvider implements ModemProvider {
 
   async getStatus(): Promise<ModemStatus> {
     if (this.#readStream && this.#writeStream) {
-      await this.#refreshStatus();
+      try {
+        await this.#refreshStatus();
+      } catch (error) {
+        const details = error instanceof Error ? error.message : String(error);
+        this.#debugLog("Status refresh failed", details);
+        this.#markDisconnected();
+      }
     }
     return this.#status;
   }
@@ -344,19 +356,27 @@ export class Ec200ModemProvider implements ModemProvider {
     const cgpaddr = await this.#sendCommand("AT+CGPADDR=1");
     const cops = await this.#sendCommand("AT+COPS?");
     const ati = await this.#sendCommand("ATI");
+    const cnum = await this.#sendOptionalCommand("AT+CNUM");
 
     const signalMatch = csq.join("\n").match(/\+CSQ:\s*(\d+),/);
     const registrationMatch = creg.join("\n").match(/\+CREG:\s*\d,(\d)/);
     const attachedMatch = cgatt.join("\n").match(/\+CGATT:\s*(\d)/);
     const addressMatch = cgpaddr.join("\n").match(/\+CGPADDR:\s*1,("?)([^"\r\n]+)\1/);
     const operatorFields = parseQuotedFields(cops.join("\n"));
+    const numberFields = parseQuotedFields(cnum.join("\n"));
 
     const ipAddress = addressMatch?.[2] && addressMatch[2] !== "0.0.0.0" ? addressMatch[2] : null;
+    const phoneNumber = numberFields[1]
+      ? maybeDecodeUcs2(numberFields[1])
+      : numberFields[0]
+        ? maybeDecodeUcs2(numberFields[0])
+        : this.#status.phoneNumber ?? null;
 
     this.#status = {
       connected: true,
       simReady: cpin.some((line) => line.includes("READY")),
       registered: registrationMatch ? ["1", "5"].includes(registrationMatch[1]) : false,
+      phoneNumber,
       operatorName: operatorFields[0] ? maybeDecodeUcs2(operatorFields[0]) : null,
       signalQuality: signalMatch ? Number.parseInt(signalMatch[1], 10) : null,
       smsReady: true,
@@ -483,6 +503,16 @@ export class Ec200ModemProvider implements ModemProvider {
 
       return responsePromise;
     });
+  }
+
+  async #sendOptionalCommand(command: string): Promise<string[]> {
+    try {
+      return await this.#sendCommand(command);
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      this.#debugLog("Optional command failed", `${command} -> ${details}`);
+      return [];
+    }
   }
 
   async #sendSmsCommand(encodedNumber: string, payload: string): Promise<string[]> {

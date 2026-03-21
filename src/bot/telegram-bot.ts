@@ -7,6 +7,7 @@ import { createTelegramProxyAgent } from "./proxy-agent";
 import { isAdminUser } from "./auth";
 import type { DraftSessionService } from "../sms/draft-session-service";
 import type { AppDatabase } from "../storage/database";
+import { formatDisplayTime } from "../time";
 
 type AppContext = Context;
 
@@ -33,13 +34,14 @@ function formatModemStatus(status: Awaited<ReturnType<ModemProvider["getStatus"]
     `连接: ${status.connected ? "online" : "offline"}`,
     `SIM: ${status.simReady ? "ready" : "not ready"}`,
     `注册: ${status.registered ? "registered" : "not registered"}`,
+    `本机号码: ${status.phoneNumber ?? "unknown"}`,
     `运营商: ${status.operatorName ?? "unknown"}`,
     `信号: ${status.signalQuality ?? "unknown"}`,
     `短信能力: ${status.smsReady ? "ready" : "not ready"}`,
     `数据附着: ${status.dataAttached ? "on" : "off"}`,
     `PDP: ${status.pdpActive ? "active" : "inactive"}`,
     `IP: ${status.ipAddress ?? "n/a"}`,
-    `更新时间: ${status.lastUpdatedAt}`,
+    `更新时间: ${formatDisplayTime(status.lastUpdatedAt)}`,
   ];
 
   return lines.join("\n");
@@ -49,10 +51,10 @@ function formatAccountSummary(summary: Awaited<ReturnType<AccountProvider["getSu
   return [
     "账户跟踪",
     `实现状态: ${summary.implementationStatus}`,
-    `最近尝试: ${summary.lastAttemptAt ?? "未发生"}`,
+    `最近尝试: ${summary.lastAttemptAt ? formatDisplayTime(summary.lastAttemptAt) : "未发生"}`,
     `余额: ${summary.airtimeCredit ?? "未可用"}`,
-    `上次余额变化: ${summary.lastBalanceChangeAt ?? "未可用"}`,
-    `下次截止日期: ${summary.nextKeepaliveDeadlineAt ?? "未可用"}`,
+    `上次余额变化: ${summary.lastBalanceChangeAt ? formatDisplayTime(summary.lastBalanceChangeAt) : "未可用"}`,
+    `下次截止日期: ${summary.nextKeepaliveDeadlineAt ? formatDisplayTime(summary.nextKeepaliveDeadlineAt) : "未可用"}`,
     `追踪状态: ${summary.trackingStatus}`,
   ].join("\n");
 }
@@ -144,6 +146,7 @@ export class TelegramBotService {
   readonly #drafts: DraftSessionService;
   readonly #accountProvider: AccountProvider;
   readonly #keepaliveJob: KeepaliveJob;
+  readonly #onRuntimeError?: (error: Error) => void;
   #notifyChatId: string;
   #pollingTask: Promise<void> | null = null;
 
@@ -157,6 +160,7 @@ export class TelegramBotService {
     drafts: DraftSessionService;
     accountProvider: AccountProvider;
     keepaliveJob: KeepaliveJob;
+    onRuntimeError?: (error: Error) => void;
   }) {
     const proxyAgent = createTelegramProxyAgent(options.telegramProxyUrl);
     this.#bot = new Telegraf<AppContext>(options.botToken, {
@@ -173,6 +177,7 @@ export class TelegramBotService {
     this.#drafts = options.drafts;
     this.#accountProvider = options.accountProvider;
     this.#keepaliveJob = options.keepaliveJob;
+    this.#onRuntimeError = options.onRuntimeError;
     this.#notifyChatId =
       options.initialNotifyChatId ??
       this.#database.getNotifyChatId() ??
@@ -181,6 +186,23 @@ export class TelegramBotService {
     if (options.initialNotifyChatId) {
       this.#database.setNotifyChatId(options.initialNotifyChatId);
     }
+
+    this.#bot.catch(async (error, ctx) => {
+      const details = error instanceof Error ? error.message : String(error);
+      console.error(`Telegram handler failed: ${details}`);
+      this.#database.insertAlert("error", "telegram_handler_failed", "Telegram handler failed.", {
+        error: details,
+        updateType: ctx.updateType,
+      });
+
+      if ("reply" in ctx) {
+        try {
+          await ctx.reply(`操作失败: ${details}`);
+        } catch {
+          // Ignore secondary Telegram failures.
+        }
+      }
+    });
 
     this.#registerHandlers();
   }
@@ -198,9 +220,9 @@ export class TelegramBotService {
 
     const internalBot = this.#bot as any;
     this.#pollingTask = (internalBot.startPolling as (allowedUpdates?: string[]) => Promise<void>)([]).catch((error: unknown) => {
-      const details = error instanceof Error ? error.message : String(error);
-      console.error(`Telegram polling stopped: ${details}`);
-      throw error;
+      const runtimeError = error instanceof Error ? error : new Error(String(error));
+      console.error(`Telegram polling stopped: ${runtimeError.message}`);
+      this.#onRuntimeError?.(runtimeError);
     });
   }
 
@@ -213,6 +235,8 @@ export class TelegramBotService {
         throw error;
       }
     }
+
+    this.#pollingTask = null;
   }
 
   async pushInboundSms(messageId: number): Promise<void> {
@@ -224,7 +248,7 @@ export class TelegramBotService {
     const payload = [
       "收到新短信",
       `号码: ${message.remoteNumber}`,
-      `时间: ${message.messageAt}`,
+      `时间: ${formatDisplayTime(message.messageAt)}`,
       `内容: ${message.body}`,
     ].join("\n");
 
@@ -361,7 +385,7 @@ export class TelegramBotService {
         for (const message of messages) {
           const prefix = message.direction === "inbound" ? "IN" : "OUT";
           lines.push(
-            `${prefix} #${message.id} ${message.remoteNumber} ${message.messageAt} ${message.status}\n${message.body}`,
+            `${prefix} #${message.id} ${message.remoteNumber} ${formatDisplayTime(message.messageAt)} ${message.status}\n${message.body}`,
           );
         }
 

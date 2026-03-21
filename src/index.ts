@@ -6,7 +6,7 @@ const app = new GgSmsApp(config);
 
 console.log("Starting gg-sms...");
 await app.start();
-console.log(`gg-sms started with modem port ${config.modemPort}`);
+console.log(`gg-sms service loop started with modem port ${config.modemPort}`);
 
 const shutdown = async (signal: string) => {
   console.log(`Received ${signal}, shutting down...`);

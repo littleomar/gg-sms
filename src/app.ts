@@ -10,6 +10,7 @@ import { DraftSessionService } from "./sms/draft-session-service";
 import { AppDatabase, DatabaseDraftSessionStore } from "./storage/database";
 
 const STARTUP_STEP_TIMEOUT_MS = 30_000;
+const COMPONENT_RETRY_DELAY_MS = 30_000;
 
 async function withTimeout<T>(label: string, operation: Promise<T>, timeoutMs = STARTUP_STEP_TIMEOUT_MS): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -37,6 +38,12 @@ export class GgSmsApp {
   readonly #draftSessions: DraftSessionService;
   readonly #keepaliveJob: KeepaliveJob;
   readonly #bot: TelegramBotService;
+  #botRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  #modemRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  #botStarting = false;
+  #modemStarting = false;
+  #botStarted = false;
+  #modemStarted = false;
   #smsPollTimer: ReturnType<typeof setTimeout> | null = null;
   #smsPollInFlight = false;
   #stopping = false;
@@ -87,49 +94,19 @@ export class GgSmsApp {
       drafts: this.#draftSessions,
       accountProvider: this.#accountProvider,
       keepaliveJob: this.#keepaliveJob,
+      onRuntimeError: (error) => {
+        void this.#handleBotRuntimeFailure(error);
+      },
     });
   }
 
   async start(): Promise<void> {
     this.#stopping = false;
 
-    console.log("Starting Telegram bot...");
-    await withTimeout("Telegram bot startup", this.#bot.start());
-    console.log("Telegram bot started.");
-
-    try {
-      console.log(`Starting modem on ${this.#config.modemPort}...`);
-      await withTimeout("Modem startup", this.#modem.start(async (message) => {
-        const storedMessage = this.#database.insertInboundSms(message);
-        try {
-          await this.#bot.pushInboundSms(storedMessage.id);
-        } catch (error) {
-          const details = error instanceof Error ? error.message : String(error);
-          console.error(`Failed to push inbound SMS ${storedMessage.id} to Telegram: ${details}`);
-          this.#database.insertAlert("error", "sms_push_failed", "Inbound SMS push to Telegram failed.", {
-            messageId: storedMessage.id,
-            remoteNumber: storedMessage.remoteNumber,
-            error: details,
-          });
-        }
-      }));
-      console.log("Modem started.");
-    } catch (error) {
-      await this.#bot.stop("startup_failed");
-      throw error;
-    }
-
-    try {
-      console.log("Scanning modem inbox for unread SMS...");
-      await withTimeout("Modem inbox scan", this.#modem.drainInbox());
-      console.log("Modem inbox scan completed.");
-    } catch (error) {
-      const details = error instanceof Error ? error.message : String(error);
-      console.error(`Failed to drain modem inbox during startup: ${details}`);
-      this.#database.insertAlert("warning", "sms_drain_failed", "Startup inbox scan failed.", {
-        error: details,
-      });
-    }
+    await Promise.allSettled([
+      this.#ensureBotStarted("startup"),
+      this.#ensureModemStarted("startup"),
+    ]);
 
     if (this.#config.smsPollIntervalMs > 0) {
       console.log(`Starting background inbox polling every ${this.#config.smsPollIntervalMs}ms...`);
@@ -139,6 +116,20 @@ export class GgSmsApp {
 
   async stop(): Promise<void> {
     this.#stopping = true;
+    this.#botStarted = false;
+    this.#modemStarted = false;
+    this.#botStarting = false;
+    this.#modemStarting = false;
+
+    if (this.#botRetryTimer) {
+      clearTimeout(this.#botRetryTimer);
+      this.#botRetryTimer = null;
+    }
+    if (this.#modemRetryTimer) {
+      clearTimeout(this.#modemRetryTimer);
+      this.#modemRetryTimer = null;
+    }
+
     if (this.#smsPollTimer) {
       clearTimeout(this.#smsPollTimer);
       this.#smsPollTimer = null;
@@ -168,17 +159,145 @@ export class GgSmsApp {
       return;
     }
 
+    if (!this.#modemStarted) {
+      await this.#ensureModemStarted("poll");
+      return;
+    }
+
     this.#smsPollInFlight = true;
     try {
       await withTimeout("Modem inbox poll", this.#modem.drainInbox());
     } catch (error) {
-      const details = error instanceof Error ? error.message : String(error);
-      console.error(`Failed to poll modem inbox: ${details}`);
-      this.#database.insertAlert("warning", "sms_poll_failed", "Background inbox poll failed.", {
-        error: details,
-      });
+      await this.#handleModemFailure(error, "Background inbox poll failed.", "sms_poll_failed");
     } finally {
       this.#smsPollInFlight = false;
     }
+  }
+
+  async #ensureBotStarted(reason: "startup" | "retry"): Promise<void> {
+    if (this.#stopping || this.#botStarted || this.#botStarting) {
+      return;
+    }
+
+    this.#botStarting = true;
+    try {
+      console.log(reason === "startup" ? "Starting Telegram bot..." : "Retrying Telegram bot startup...");
+      await withTimeout("Telegram bot startup", this.#bot.start());
+      this.#botStarted = true;
+      if (this.#botRetryTimer) {
+        clearTimeout(this.#botRetryTimer);
+        this.#botRetryTimer = null;
+      }
+      console.log("Telegram bot started.");
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      console.error(`Telegram bot startup failed: ${details}`);
+      this.#database.insertAlert("warning", "telegram_start_failed", "Telegram bot startup failed.", {
+        error: details,
+      });
+      await this.#bot.stop("startup_failed").catch(() => undefined);
+      this.#scheduleBotRetry();
+    } finally {
+      this.#botStarting = false;
+    }
+  }
+
+  async #ensureModemStarted(reason: "startup" | "retry" | "poll"): Promise<void> {
+    if (this.#stopping || this.#modemStarted || this.#modemStarting) {
+      return;
+    }
+
+    this.#modemStarting = true;
+    try {
+      console.log(reason === "startup" ? `Starting modem on ${this.#config.modemPort}...` : `Retrying modem on ${this.#config.modemPort}...`);
+      await withTimeout("Modem startup", this.#modem.start(async (message) => {
+        const storedMessage = this.#database.insertInboundSms(message);
+        try {
+          await this.#bot.pushInboundSms(storedMessage.id);
+        } catch (error) {
+          const details = error instanceof Error ? error.message : String(error);
+          console.error(`Failed to push inbound SMS ${storedMessage.id} to Telegram: ${details}`);
+          this.#database.insertAlert("error", "sms_push_failed", "Inbound SMS push to Telegram failed.", {
+            messageId: storedMessage.id,
+            remoteNumber: storedMessage.remoteNumber,
+            error: details,
+          });
+        }
+      }));
+
+      this.#modemStarted = true;
+      if (this.#modemRetryTimer) {
+        clearTimeout(this.#modemRetryTimer);
+        this.#modemRetryTimer = null;
+      }
+      console.log("Modem started.");
+      await this.#scanInboxAfterStartup();
+    } catch (error) {
+      await this.#handleModemFailure(error, "Modem startup failed.", "modem_start_failed");
+    } finally {
+      this.#modemStarting = false;
+    }
+  }
+
+  async #scanInboxAfterStartup(): Promise<void> {
+    try {
+      console.log("Scanning modem inbox for unread SMS...");
+      await withTimeout("Modem inbox scan", this.#modem.drainInbox());
+      console.log("Modem inbox scan completed.");
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      console.error(`Failed to drain modem inbox during startup: ${details}`);
+      this.#database.insertAlert("warning", "sms_drain_failed", "Startup inbox scan failed.", {
+        error: details,
+      });
+    }
+  }
+
+  async #handleBotRuntimeFailure(error: Error): Promise<void> {
+    if (this.#stopping) {
+      return;
+    }
+
+    this.#botStarted = false;
+    this.#database.insertAlert("warning", "telegram_runtime_failed", "Telegram bot stopped unexpectedly.", {
+      error: error.message,
+    });
+    await this.#bot.stop("runtime_failed").catch(() => undefined);
+    this.#scheduleBotRetry();
+  }
+
+  async #handleModemFailure(error: unknown, message: string, code: string): Promise<void> {
+    const details = error instanceof Error ? error.message : String(error);
+    console.error(`${message} ${details}`);
+    this.#database.insertAlert("warning", code, message, {
+      error: details,
+    });
+    this.#modemStarted = false;
+    await this.#modem.stop().catch(() => undefined);
+    this.#scheduleModemRetry();
+  }
+
+  #scheduleBotRetry(): void {
+    if (this.#stopping || this.#botRetryTimer) {
+      return;
+    }
+
+    console.log(`Telegram bot will retry in ${COMPONENT_RETRY_DELAY_MS}ms.`);
+    this.#botRetryTimer = setTimeout(() => {
+      this.#botRetryTimer = null;
+      void this.#ensureBotStarted("retry");
+    }, COMPONENT_RETRY_DELAY_MS);
+  }
+
+  #scheduleModemRetry(): void {
+    if (this.#stopping || this.#modemRetryTimer) {
+      return;
+    }
+
+    console.log(`Modem will retry in ${COMPONENT_RETRY_DELAY_MS}ms.`);
+    this.#modemRetryTimer = setTimeout(() => {
+      this.#modemRetryTimer = null;
+      void this.#ensureModemStarted("retry");
+    }, COMPONENT_RETRY_DELAY_MS);
   }
 }
