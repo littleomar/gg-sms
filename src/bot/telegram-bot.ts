@@ -4,7 +4,7 @@ import type { AccountProvider } from "../account/provider";
 import type { KeepaliveJob } from "../jobs/keepalive-job";
 import { createLogger } from "../logger";
 import type { ModemProvider } from "../modem/types";
-import { createTelegramProxyAgent } from "./proxy-agent";
+import { applyTelegramProxyEnvironment, createTelegramProxyAgent } from "./proxy-agent";
 import { isAdminUser } from "./auth";
 import type { DraftSessionService } from "../sms/draft-session-service";
 import type { AppDatabase } from "../storage/database";
@@ -164,6 +164,7 @@ export class TelegramBotService {
     keepaliveJob: KeepaliveJob;
     onRuntimeError?: (error: Error) => void;
   }) {
+    const proxyConfiguration = applyTelegramProxyEnvironment(options.telegramProxyUrl);
     const proxyAgent = createTelegramProxyAgent(options.telegramProxyUrl);
     this.#bot = new Telegraf<AppContext>(options.botToken, {
       telegram: proxyAgent
@@ -173,6 +174,17 @@ export class TelegramBotService {
           }
         : undefined,
     });
+    if (proxyConfiguration.enabled) {
+      logger.info("Configured Telegram proxy.", proxyConfiguration);
+      if (!proxyConfiguration.bunEnvProxyApplied) {
+        logger.warn(
+          "Telegram proxy uses a non-HTTP protocol; Bun's environment proxy fallback was not applied. If Telegram remains unreachable, prefer an http(s) proxy URL for TELEGRAM_PROXY_URL.",
+          {
+            protocol: proxyConfiguration.protocol,
+          },
+        );
+      }
+    }
     this.#adminId = options.adminId;
     this.#modem = options.modem;
     this.#database = options.database;
