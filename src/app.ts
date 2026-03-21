@@ -70,6 +70,7 @@ export class GgSmsApp {
     this.#bot = new TelegramBotService({
       botToken: config.botToken,
       adminId: config.botAdminId,
+      initialNotifyChatId: config.botNotifyChatId,
       telegramProxyUrl: config.telegramProxyUrl,
       modem: this.#modem,
       database: this.#database,

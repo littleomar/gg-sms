@@ -120,6 +120,18 @@ export class AppDatabase {
       VALUES (1, NULL, NULL, NULL, NULL, NULL, 'unavailable')
       ON CONFLICT(singleton_id) DO NOTHING;
 
+      CREATE TABLE IF NOT EXISTS bot_runtime_state (
+        singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+        notify_chat_id TEXT
+      );
+
+      INSERT INTO bot_runtime_state (
+        singleton_id,
+        notify_chat_id
+      )
+      VALUES (1, NULL)
+      ON CONFLICT(singleton_id) DO NOTHING;
+
       CREATE TABLE IF NOT EXISTS job_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         job_name TEXT NOT NULL,
@@ -319,6 +331,25 @@ export class AppDatabase {
       SET last_account_attempt_at = ?
       WHERE singleton_id = 1
     `).run(atIso);
+  }
+
+  getNotifyChatId(): string | null {
+    const row = this.#db.query(`
+      SELECT notify_chat_id
+      FROM bot_runtime_state
+      WHERE singleton_id = 1
+      LIMIT 1
+    `).get() as { notify_chat_id: string | null };
+
+    return row.notify_chat_id;
+  }
+
+  setNotifyChatId(chatId: string): void {
+    this.#db.query(`
+      UPDATE bot_runtime_state
+      SET notify_chat_id = ?
+      WHERE singleton_id = 1
+    `).run(chatId);
   }
 
   startJobRun(jobName: string): number {

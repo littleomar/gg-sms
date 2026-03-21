@@ -123,12 +123,13 @@ export class TelegramBotService {
   readonly #drafts: DraftSessionService;
   readonly #accountProvider: AccountProvider;
   readonly #keepaliveJob: KeepaliveJob;
-  readonly #chatId: string;
+  #notifyChatId: string;
   #pollingTask: Promise<void> | null = null;
 
   constructor(options: {
     botToken: string;
     adminId: string;
+    initialNotifyChatId?: string;
     telegramProxyUrl?: string;
     modem: ModemProvider;
     database: AppDatabase;
@@ -146,12 +147,19 @@ export class TelegramBotService {
         : undefined,
     });
     this.#adminId = options.adminId;
-    this.#chatId = options.adminId;
     this.#modem = options.modem;
     this.#database = options.database;
     this.#drafts = options.drafts;
     this.#accountProvider = options.accountProvider;
     this.#keepaliveJob = options.keepaliveJob;
+    this.#notifyChatId =
+      options.initialNotifyChatId ??
+      this.#database.getNotifyChatId() ??
+      options.adminId;
+
+    if (options.initialNotifyChatId) {
+      this.#database.setNotifyChatId(options.initialNotifyChatId);
+    }
 
     this.#registerHandlers();
   }
@@ -193,7 +201,7 @@ export class TelegramBotService {
       `内容: ${message.body}`,
     ].join("\n");
 
-    await this.#bot.telegram.sendMessage(this.#chatId, payload, {
+    await this.#bot.telegram.sendMessage(this.#notifyChatId, payload, {
       reply_markup: Markup.inlineKeyboard([
         Markup.button.callback("Reply", `sms:reply:${message.id}`),
       ]).reply_markup,
@@ -201,7 +209,7 @@ export class TelegramBotService {
   }
 
   async pushAlert(title: string, body: string): Promise<void> {
-    await this.#bot.telegram.sendMessage(this.#chatId, `${title}\n${body}`);
+    await this.#bot.telegram.sendMessage(this.#notifyChatId, `${title}\n${body}`);
   }
 
   #registerHandlers(): void {
@@ -213,6 +221,13 @@ export class TelegramBotService {
         }
         return;
       }
+
+      const currentChatId = String(ctx.chat?.id ?? this.#adminId);
+      if (currentChatId !== this.#notifyChatId) {
+        this.#notifyChatId = currentChatId;
+        this.#database.setNotifyChatId(currentChatId);
+      }
+
       await next();
     });
 

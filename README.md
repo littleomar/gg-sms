@@ -46,6 +46,7 @@ bun test
 
 - `BOT_TOKEN`: Telegram bot token
 - `BOT_ADMIN_ID`: 唯一允许操作 bot 的 Telegram user/chat id
+- `BOT_NOTIFY_CHAT_ID`: 主动推送短信和告警的目标 chat id；不填时默认沿用管理员最近一次实际使用 bot 的 chat
 - `TELEGRAM_PROXY_URL`: Telegram 出口代理地址，支持 `http://`、`https://`、`socks://`、`socks5://` 等 URL；中国大陆环境下通常需要配置
 - `MODEM_DEBUG`: 设为 `1` 后输出 modem AT 命令、串口返回和入站短信处理日志，排查收短信问题时很有用
 - `SMS_SEND_PASSWORD`: 每次发送短信都要输入的密码

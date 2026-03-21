@@ -1,6 +1,7 @@
 export type AppConfig = {
   botToken: string;
   botAdminId: string;
+  botNotifyChatId?: string;
   telegramProxyUrl?: string;
   modemDebug: boolean;
   smsSendPassword: string;
@@ -65,6 +66,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   return {
     botToken: requireEnv("BOT_TOKEN", env),
     botAdminId: requireEnv("BOT_ADMIN_ID", env),
+    botNotifyChatId: parseOptional("BOT_NOTIFY_CHAT_ID", env),
     telegramProxyUrl: parseOptional("TELEGRAM_PROXY_URL", env),
     modemDebug: parseBoolean(env.MODEM_DEBUG),
     smsSendPassword: requireEnv("SMS_SEND_PASSWORD", env),
