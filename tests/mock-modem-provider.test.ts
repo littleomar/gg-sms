@@ -32,4 +32,17 @@ describe("MockModemProvider", () => {
       "+447700900124:hello two",
     ]);
   });
+
+  it("simulates keepalive traffic through the modem transport", async () => {
+    const modem = new MockModemProvider();
+
+    const result = await modem.performKeepaliveRequest("https://example.com/generate_204", 5_000);
+    const status = await modem.getStatus();
+
+    expect(result.httpStatus).toBe(204);
+    expect(result.protocol).toBe("https");
+    expect(modem.keepaliveRequests).toHaveLength(1);
+    expect(status.dataAttached).toBe(false);
+    expect(status.pdpActive).toBe(false);
+  });
 });

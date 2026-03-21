@@ -1,4 +1,11 @@
-import type { InboundSms, ModemProvider, ModemStatus, OutboundSmsInput, OutboundSmsResult } from "./types";
+import type {
+  InboundSms,
+  KeepaliveRequestResult,
+  ModemProvider,
+  ModemStatus,
+  OutboundSmsInput,
+  OutboundSmsResult,
+} from "./types";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -22,6 +29,8 @@ export class MockModemProvider implements ModemProvider {
     lastUpdatedAt: nowIso(),
   };
   sentMessages: OutboundSmsInput[] = [];
+  keepaliveRequests: Array<{ url: string; timeoutMs: number }> = [];
+  keepaliveHandler: ((url: string, timeoutMs: number) => Promise<KeepaliveRequestResult>) | null = null;
 
   async start(onInboundSms: (message: InboundSms) => Promise<void> | void): Promise<void> {
     this.#onInboundSms = onInboundSms;
@@ -59,6 +68,37 @@ export class MockModemProvider implements ModemProvider {
       modemMessageId: `${this.sentMessages.length}`,
       sentAt: nowIso(),
     };
+  }
+
+  async performKeepaliveRequest(url: string, timeoutMs: number): Promise<KeepaliveRequestResult> {
+    this.keepaliveRequests.push({ url, timeoutMs });
+    this.#status = {
+      ...this.#status,
+      dataAttached: true,
+      pdpActive: true,
+      ipAddress: "10.0.0.2",
+      lastUpdatedAt: nowIso(),
+    };
+
+    try {
+      if (this.keepaliveHandler) {
+        return await this.keepaliveHandler(url, timeoutMs);
+      }
+
+      return {
+        httpStatus: 204,
+        responseLength: 0,
+        protocol: url.toLowerCase().startsWith("https://") ? "https" : "http",
+      };
+    } finally {
+      this.#status = {
+        ...this.#status,
+        dataAttached: false,
+        pdpActive: false,
+        ipAddress: null,
+        lastUpdatedAt: nowIso(),
+      };
+    }
   }
 
   async emitInboundSms(message: InboundSms): Promise<void> {

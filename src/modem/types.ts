@@ -34,6 +34,12 @@ export type OutboundSmsResult = {
   sentAt: string;
 };
 
+export type KeepaliveRequestResult = {
+  httpStatus: number;
+  responseLength: number;
+  protocol: "http" | "https";
+};
+
 export interface ModemProvider {
   start(onInboundSms: (message: InboundSms) => Promise<void> | void): Promise<void>;
   drainInbox(): Promise<void>;
@@ -42,4 +48,5 @@ export interface ModemProvider {
   setDataEnabled(enabled: boolean): Promise<void>;
   waitForDataReady(timeoutMs: number): Promise<void>;
   sendSms(input: OutboundSmsInput): Promise<OutboundSmsResult>;
+  performKeepaliveRequest(url: string, timeoutMs: number): Promise<KeepaliveRequestResult>;
 }

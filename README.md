@@ -66,6 +66,7 @@ bun test
 - `/account` 当前支持用 `GG_DASHBOARD_COOKIE` 或 TG 命令 `/accountcookie <cookie>` 直抓 giffgaff dashboard 余额。
 - EC200 驱动当前通过 `stty + /dev/tty*` 的 POSIX TTY 方式工作，真实部署前建议先在你的 FNOS + 模块环境上做一次串口和 AT 命令兼容验证。
 - 自动保号调度还没有实现，当前只支持手动执行 `/keepalive`。
+- `/keepalive` 现在通过 EC200 模块自身发起 HTTP(S) 请求，流量走 SIM 卡而不是宿主机默认网络；为兼容性，模块侧 HTTPS 默认关闭证书校验。
 
 ## 本地开发提示
 
@@ -73,3 +74,4 @@ bun test
 - 如果宿主机无法直连 Telegram Bot API，请配置 `TELEGRAM_PROXY_URL`，例如 `socks5://127.0.0.1:7890`。
 - 如果怀疑短信没有被读取到，可以临时设置 `MODEM_DEBUG=1`，再观察是否出现 `+CMTI`、`AT+CMGR`、启动时 inbox scan，以及后台轮询日志。
 - 如果你想直接在 TG 里更新 dashboard 登录态，可以发送 `/accountcookie <cookie>`；bot 会尽量删除原始消息，降低 cookie 暴露时间。
+- 建议把 `KEEPALIVE_URL` 设成返回 `204` 或极小响应体的地址，这样模块侧 keepalive 消耗的 SIM 流量最少。

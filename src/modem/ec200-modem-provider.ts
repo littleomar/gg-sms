@@ -8,18 +8,34 @@ import {
   type WriteStream,
 } from "node:fs";
 
-import type { InboundSms, ModemProvider, ModemStatus, OutboundSmsInput, OutboundSmsResult } from "./types";
+import type {
+  InboundSms,
+  KeepaliveRequestResult,
+  ModemProvider,
+  ModemStatus,
+  OutboundSmsInput,
+  OutboundSmsResult,
+} from "./types";
 
 const CTRL_Z = String.fromCharCode(26);
+const KEEPALIVE_CONTEXT_ID = 2;
+const KEEPALIVE_SSL_CONTEXT_ID = 1;
 
 type PendingResponse = {
   command: string;
   lines: string[];
-  mode: "standard" | "prompt";
+  mode: "standard" | "prompt" | "connect";
   resolve: (lines: string[]) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   onPrompt?: () => void;
+};
+
+type PendingLineWaiter = {
+  prefix: string;
+  resolve: (line: string) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 };
 
 function nowIso(): string {
@@ -83,6 +99,10 @@ function parseQuotedFields(input: string): string[] {
   return Array.from(input.matchAll(/"([^"]*)"/g)).map((match) => match[1]);
 }
 
+function escapeRegex(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export class Ec200ModemProvider implements ModemProvider {
   readonly #portPath: string;
   readonly #baudRate: number;
@@ -98,6 +118,7 @@ export class Ec200ModemProvider implements ModemProvider {
   #writeFd: number | null = null;
   #buffer = "";
   #pendingResponse: PendingResponse | null = null;
+  #pendingLineWaiters: PendingLineWaiter[] = [];
   #commandQueue = Promise.resolve();
   #onInboundSms: ((message: InboundSms) => Promise<void> | void) | null = null;
   #status: ModemStatus = {
@@ -279,6 +300,73 @@ export class Ec200ModemProvider implements ModemProvider {
     };
   }
 
+  async performKeepaliveRequest(url: string, timeoutMs: number): Promise<KeepaliveRequestResult> {
+    return this.#enqueue(() => this.#performKeepaliveRequestInternal(url, timeoutMs));
+  }
+
+  async #performKeepaliveRequestInternal(url: string, timeoutMs: number): Promise<KeepaliveRequestResult> {
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      throw new Error(`Invalid keepalive URL: ${url}`);
+    }
+
+    const protocol = parsedUrl.protocol === "https:" ? "https" : parsedUrl.protocol === "http:" ? "http" : null;
+    if (!protocol) {
+      throw new Error(`Unsupported keepalive URL protocol: ${parsedUrl.protocol}`);
+    }
+
+    const responseTimeoutSeconds = this.#toCommandTimeoutSeconds(timeoutMs);
+    let responseLengthHint: number | null = null;
+
+    try {
+      await this.#sendCommandInternal(`AT+QICSGP=${KEEPALIVE_CONTEXT_ID},1,"${this.#apnName}","${this.#apnUser ?? ""}","${this.#apnPass ?? ""}",1`);
+      await this.#sendCommandInternal("AT+CGATT=1");
+      await this.#sendCommandInternal(`AT+QHTTPCFG="contextid",${KEEPALIVE_CONTEXT_ID}`);
+      await this.#sendCommandInternal('AT+QHTTPCFG="requestheader",0');
+      await this.#sendCommandInternal('AT+QHTTPCFG="responseheader",0');
+
+      if (protocol === "https") {
+        await this.#sendCommandInternal(`AT+QHTTPCFG="sslctxid",${KEEPALIVE_SSL_CONTEXT_ID}`);
+        await this.#sendCommandInternal(`AT+QSSLCFG="seclevel",${KEEPALIVE_SSL_CONTEXT_ID},0`);
+      }
+
+      await this.#sendCommandInternal(`AT+QIACT=${KEEPALIVE_CONTEXT_ID}`);
+      await this.#waitForKeepaliveContextReadyInternal(timeoutMs);
+      await this.#sendConnectWriteCommandInternal(
+        `AT+QHTTPURL=${Buffer.byteLength(url, "utf8")},${responseTimeoutSeconds}`,
+        url,
+      );
+
+      const httpGetLine = await this.#sendCommandAndWaitForLineInternal(
+        `AT+QHTTPGET=${responseTimeoutSeconds}`,
+        "+QHTTPGET:",
+        timeoutMs,
+      );
+      const httpGetResult = this.#parseKeepaliveStatusLine(httpGetLine, "+QHTTPGET:");
+      if (httpGetResult.err !== 0) {
+        throw new Error(`Module HTTP GET failed with error ${httpGetResult.err}`);
+      }
+
+      responseLengthHint = httpGetResult.contentLength;
+      const responseLength = await this.#discardHttpResponseInternal(timeoutMs, responseLengthHint);
+
+      return {
+        httpStatus: httpGetResult.httpStatus,
+        responseLength,
+        protocol,
+      };
+    } finally {
+      await this.#cleanupKeepaliveSessionInternal();
+      try {
+        await this.#refreshStatus();
+      } catch {
+        this.#markDisconnected();
+      }
+    }
+  }
+
   async #initializeModem(): Promise<void> {
     await this.#sendCommand("ATE0");
     await this.#sendCommand("AT+CMEE=2");
@@ -388,6 +476,84 @@ export class Ec200ModemProvider implements ModemProvider {
     };
   }
 
+  async #waitForKeepaliveContextReadyInternal(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const lines = await this.#sendOptionalCommandInternal("AT+QIACT?");
+      const match = lines
+        .map((line) => line.match(new RegExp(`^\\+QIACT:\\s*${KEEPALIVE_CONTEXT_ID},\\d,\\d,"([^"]+)"`)))
+        .find((value): value is RegExpMatchArray => value !== null);
+
+      if (match?.[1] && match[1] !== "0.0.0.0") {
+        this.#status = {
+          ...this.#status,
+          connected: true,
+          dataAttached: true,
+          pdpActive: true,
+          ipAddress: match[1],
+          lastUpdatedAt: nowIso(),
+        };
+        return;
+      }
+
+      await sleep(1_000);
+    }
+
+    throw new Error("Timed out waiting for keepalive PDP context to become ready");
+  }
+
+  async #discardHttpResponseInternal(timeoutMs: number, responseLengthHint: number | null): Promise<number> {
+    const readLine = await this.#sendCommandAndWaitForLineInternal(
+      `AT+QHTTPREAD=${this.#toCommandTimeoutSeconds(timeoutMs)}`,
+      "+QHTTPREAD:",
+      timeoutMs,
+    );
+
+    const readResult = this.#parseReadStatusLine(readLine);
+    if (readResult.err !== 0) {
+      throw new Error(`Module HTTP response read failed with error ${readResult.err}`);
+    }
+
+    return responseLengthHint ?? readResult.responseLength ?? 0;
+  }
+
+  async #cleanupKeepaliveSessionInternal(): Promise<void> {
+    await this.#sendOptionalCommandInternal("AT+QHTTPSTOP");
+    await this.#sendOptionalCommandInternal(`AT+QIDEACT=${KEEPALIVE_CONTEXT_ID}`);
+  }
+
+  #parseKeepaliveStatusLine(line: string, prefix: string): {
+    err: number;
+    httpStatus: number;
+    contentLength: number | null;
+  } {
+    const match = line.match(new RegExp(`^${escapeRegex(prefix)}\\s*(\\d+)(?:,(\\d+)(?:,(\\d+))?)?$`));
+    if (!match) {
+      throw new Error(`Unexpected keepalive status line: ${line}`);
+    }
+
+    const err = Number.parseInt(match[1], 10);
+    const httpStatus = match[2] ? Number.parseInt(match[2], 10) : 0;
+    const contentLength = match[3] ? Number.parseInt(match[3], 10) : null;
+    return { err, httpStatus, contentLength };
+  }
+
+  #parseReadStatusLine(line: string): { err: number; responseLength: number | null } {
+    const match = line.match(/^\+QHTTPREAD:\s*(\d+)(?:,(\d+))?$/);
+    if (!match) {
+      throw new Error(`Unexpected keepalive read status line: ${line}`);
+    }
+
+    return {
+      err: Number.parseInt(match[1], 10),
+      responseLength: match[2] ? Number.parseInt(match[2], 10) : null,
+    };
+  }
+
+  #toCommandTimeoutSeconds(timeoutMs: number): number {
+    return Math.max(1, Math.ceil(timeoutMs / 1000));
+  }
+
   async #handleInboundMessage(index: number, source = "notification"): Promise<void> {
     try {
       this.#debugLog("Reading inbound SMS", `index=${index}, source=${source}`);
@@ -446,11 +612,20 @@ export class Ec200ModemProvider implements ModemProvider {
     }
 
     const pending = this.#pendingResponse;
+    if (!pending && this.#resolveLineWaiter(line)) {
+      return;
+    }
+
     if (!pending) {
       return;
     }
 
     if (line === pending.command) {
+      return;
+    }
+
+    if (pending.mode === "connect" && line === "CONNECT") {
+      pending.onPrompt?.();
       return;
     }
 
@@ -472,37 +647,7 @@ export class Ec200ModemProvider implements ModemProvider {
   }
 
   async #sendCommand(command: string): Promise<string[]> {
-    return this.#enqueue(async () => {
-      this.#debugLog("TX", command);
-      const responsePromise = new Promise<string[]>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          this.#pendingResponse = null;
-          reject(new Error(`Timed out waiting for modem response: ${command}`));
-        }, this.#commandTimeoutMs);
-
-        this.#pendingResponse = {
-          command,
-          lines: [],
-          mode: "standard",
-          resolve,
-          reject,
-          timer,
-        };
-      });
-
-      try {
-        await this.#write(`${command}\r`);
-      } catch (error) {
-        const pending = this.#pendingResponse;
-        if (pending) {
-          clearTimeout(pending.timer);
-          this.#pendingResponse = null;
-          pending.reject(error instanceof Error ? error : new Error(String(error)));
-        }
-      }
-
-      return responsePromise;
-    });
+    return this.#enqueue(() => this.#sendCommandInternal(command));
   }
 
   async #sendOptionalCommand(command: string): Promise<string[]> {
@@ -513,6 +658,115 @@ export class Ec200ModemProvider implements ModemProvider {
       this.#debugLog("Optional command failed", `${command} -> ${details}`);
       return [];
     }
+  }
+
+  async #sendCommandInternal(command: string): Promise<string[]> {
+    this.#debugLog("TX", command);
+    const responsePromise = new Promise<string[]>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pendingResponse = null;
+        reject(new Error(`Timed out waiting for modem response: ${command}`));
+      }, this.#commandTimeoutMs);
+
+      this.#pendingResponse = {
+        command,
+        lines: [],
+        mode: "standard",
+        resolve,
+        reject,
+        timer,
+      };
+    });
+
+    try {
+      await this.#write(`${command}\r`);
+    } catch (error) {
+      const pending = this.#pendingResponse;
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.#pendingResponse = null;
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+
+    return responsePromise;
+  }
+
+  async #sendOptionalCommandInternal(command: string): Promise<string[]> {
+    try {
+      return await this.#sendCommandInternal(command);
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      this.#debugLog("Optional command failed", `${command} -> ${details}`);
+      return [];
+    }
+  }
+
+  async #sendCommandAndWaitForLineInternal(command: string, prefix: string, timeoutMs: number): Promise<string> {
+    const waiter = this.#createLineWaiter(prefix, timeoutMs);
+    try {
+      await this.#sendCommandInternal(command);
+      return await waiter.promise;
+    } catch (error) {
+      waiter.cancel();
+      throw error;
+    }
+  }
+
+  async #sendConnectWriteCommandInternal(command: string, payload: string): Promise<string[]> {
+    this.#debugLog("TX", command);
+    const responsePromise = new Promise<string[]>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pendingResponse = null;
+        reject(new Error(`Timed out waiting for modem CONNECT: ${command}`));
+      }, this.#commandTimeoutMs);
+
+      this.#pendingResponse = {
+        command,
+        lines: [],
+        mode: "connect",
+        resolve,
+        reject,
+        timer,
+        onPrompt: () => {
+          const current = this.#pendingResponse;
+          if (!current) {
+            return;
+          }
+
+          clearTimeout(current.timer);
+          current.mode = "standard";
+          current.timer = setTimeout(() => {
+            this.#pendingResponse = null;
+            current.reject(new Error(`Timed out waiting for modem final response: ${command}`));
+          }, this.#commandTimeoutMs);
+
+          this.#debugLog("TX", "<connect-payload>");
+          void this.#write(payload).catch((error) => {
+            const active = this.#pendingResponse;
+            if (!active) {
+              return;
+            }
+            clearTimeout(active.timer);
+            this.#pendingResponse = null;
+            active.reject(error instanceof Error ? error : new Error(String(error)));
+          });
+        },
+      };
+    });
+
+    try {
+      await this.#write(`${command}\r`);
+    } catch (error) {
+      const pending = this.#pendingResponse;
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.#pendingResponse = null;
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+
+    return responsePromise;
   }
 
   async #sendSmsCommand(encodedNumber: string, payload: string): Promise<string[]> {
@@ -570,6 +824,68 @@ export class Ec200ModemProvider implements ModemProvider {
     }
 
     return responsePromise;
+  }
+
+  #createLineWaiter(prefix: string, timeoutMs: number): {
+    promise: Promise<string>;
+    cancel: () => void;
+  } {
+    let settled = false;
+    let waiter: PendingLineWaiter;
+
+    const promise = new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pendingLineWaiters = this.#pendingLineWaiters.filter((candidate) => candidate !== waiter);
+        settled = true;
+        reject(new Error(`Timed out waiting for modem URC: ${prefix}`));
+      }, timeoutMs);
+
+      waiter = {
+        prefix,
+        resolve: (line) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          resolve(line);
+        },
+        reject: (error) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        },
+        timer,
+      };
+      this.#pendingLineWaiters.push(waiter);
+    });
+
+    return {
+      promise,
+      cancel: () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(waiter.timer);
+        this.#pendingLineWaiters = this.#pendingLineWaiters.filter((candidate) => candidate !== waiter);
+      },
+    };
+  }
+
+  #resolveLineWaiter(line: string): boolean {
+    const waiter = this.#pendingLineWaiters.find((candidate) => line.startsWith(candidate.prefix));
+    if (!waiter) {
+      return false;
+    }
+
+    this.#pendingLineWaiters = this.#pendingLineWaiters.filter((candidate) => candidate !== waiter);
+    clearTimeout(waiter.timer);
+    waiter.resolve(line);
+    return true;
   }
 
   async #write(data: string): Promise<void> {
