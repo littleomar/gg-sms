@@ -6,7 +6,7 @@
 
 - Bun + TypeScript 项目骨架
 - Telegram bot 单管理员鉴权
-- EC200 `ModemProvider` 接口和基础串口实现
+- EC200 `ModemProvider` 接口和基于 POSIX TTY 的基础串口实现
 - `/status`、`/data on`、`/data off`、`/sms`、`/sms inbox [n]`、`/keepalive`、`/account`
 - 入站短信主动推送，并带 `Reply` 按钮
 - 新建短信草稿或回复短信时的多步交互
@@ -57,7 +57,7 @@ bun test
 ## 当前限制
 
 - `/account` 还没有接入真实的 Playwright 或 API 抓取逻辑，目前只返回占位信息，并记录最近一次尝试时间。
-- EC200 驱动目前是可运行的基础版本，真实部署前建议先在你的 FNOS + 模块环境上做一次串口和 AT 命令兼容验证。
+- EC200 驱动当前通过 `stty + /dev/tty*` 的 POSIX TTY 方式工作，真实部署前建议先在你的 FNOS + 模块环境上做一次串口和 AT 命令兼容验证。
 - 自动保号调度还没有实现，当前只支持手动执行 `/keepalive`。
 
 ## 本地开发提示

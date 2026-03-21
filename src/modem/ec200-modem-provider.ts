@@ -1,4 +1,12 @@
-import { SerialPort } from "serialport";
+import { execFile } from "node:child_process";
+import {
+  closeSync,
+  createReadStream,
+  createWriteStream,
+  openSync,
+  type ReadStream,
+  type WriteStream,
+} from "node:fs";
 
 import type { InboundSms, ModemProvider, ModemStatus, OutboundSmsInput, OutboundSmsResult } from "./types";
 
@@ -20,6 +28,18 @@ function nowIso(): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function execFileAsync(file: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, (error, _stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr.trim() || error.message));
+        return;
+      }
+      resolve();
+    });
+  });
 }
 
 function encodeUcs2(text: string): string {
@@ -71,7 +91,10 @@ export class Ec200ModemProvider implements ModemProvider {
   readonly #apnPass?: string;
   readonly #simPin?: string;
   readonly #commandTimeoutMs: number;
-  #port: SerialPort | null = null;
+  #readStream: ReadStream | null = null;
+  #writeStream: WriteStream | null = null;
+  #readFd: number | null = null;
+  #writeFd: number | null = null;
   #buffer = "";
   #pendingResponse: PendingResponse | null = null;
   #commandQueue = Promise.resolve();
@@ -110,29 +133,29 @@ export class Ec200ModemProvider implements ModemProvider {
 
   async start(onInboundSms: (message: InboundSms) => Promise<void> | void): Promise<void> {
     this.#onInboundSms = onInboundSms;
-    this.#port = new SerialPort({
-      path: this.#portPath,
-      baudRate: this.#baudRate,
-      autoOpen: false,
+    await this.#configurePort();
+
+    this.#readFd = openSync(this.#portPath, "r");
+    this.#writeFd = openSync(this.#portPath, "r+");
+    this.#readStream = createReadStream(this.#portPath, {
+      fd: this.#readFd,
+      autoClose: false,
+      encoding: "utf8",
+    });
+    this.#writeStream = createWriteStream(this.#portPath, {
+      fd: this.#writeFd,
+      autoClose: false,
+      encoding: "utf8",
     });
 
-    this.#port.on("data", (data: Buffer) => this.#handleChunk(data.toString("utf8")));
-    this.#port.on("error", () => {
-      this.#status = {
-        ...this.#status,
-        connected: false,
-        lastUpdatedAt: nowIso(),
-      };
+    this.#readStream.on("data", (chunk: string | Buffer) =>
+      this.#handleChunk(typeof chunk === "string" ? chunk : chunk.toString("utf8")),
+    );
+    this.#readStream.on("error", () => {
+      this.#markDisconnected();
     });
-
-    await new Promise<void>((resolve, reject) => {
-      this.#port?.open((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      });
+    this.#writeStream.on("error", () => {
+      this.#markDisconnected();
     });
 
     this.#status = {
@@ -146,14 +169,24 @@ export class Ec200ModemProvider implements ModemProvider {
   }
 
   async stop(): Promise<void> {
-    if (!this.#port) {
+    if (!this.#readStream && !this.#writeStream && this.#readFd === null && this.#writeFd === null) {
       return;
     }
 
-    await new Promise<void>((resolve) => {
-      this.#port?.close(() => resolve());
-    });
-    this.#port = null;
+    this.#readStream?.destroy();
+    this.#writeStream?.destroy();
+    this.#readStream = null;
+    this.#writeStream = null;
+
+    if (this.#readFd !== null) {
+      closeSync(this.#readFd);
+      this.#readFd = null;
+    }
+    if (this.#writeFd !== null) {
+      closeSync(this.#writeFd);
+      this.#writeFd = null;
+    }
+
     this.#status = {
       ...this.#status,
       connected: false,
@@ -162,7 +195,7 @@ export class Ec200ModemProvider implements ModemProvider {
   }
 
   async getStatus(): Promise<ModemStatus> {
-    if (this.#port) {
+    if (this.#readStream && this.#writeStream) {
       await this.#refreshStatus();
     }
     return this.#status;
@@ -227,6 +260,32 @@ export class Ec200ModemProvider implements ModemProvider {
     await this.#sendCommand("AT+CSMP=17,167,0,8");
     await this.#sendCommand('AT+CPMS="ME","ME","ME"');
     await this.#sendCommand("AT+CNMI=2,1,0,0,0");
+  }
+
+  async #configurePort(): Promise<void> {
+    const sttyFlag = process.platform === "darwin" ? "-f" : "-F";
+    await execFileAsync("stty", [
+      sttyFlag,
+      this.#portPath,
+      String(this.#baudRate),
+      "raw",
+      "-echo",
+      "-ixon",
+      "-ixoff",
+      "cs8",
+      "-parenb",
+      "-cstopb",
+      "cread",
+      "clocal",
+    ]);
+  }
+
+  #markDisconnected(): void {
+    this.#status = {
+      ...this.#status,
+      connected: false,
+      lastUpdatedAt: nowIso(),
+    };
   }
 
   async #refreshStatus(): Promise<void> {
@@ -429,23 +488,17 @@ export class Ec200ModemProvider implements ModemProvider {
   }
 
   async #write(data: string): Promise<void> {
-    if (!this.#port) {
+    if (!this.#writeStream) {
       throw new Error("Modem serial port is not open");
     }
 
     await new Promise<void>((resolve, reject) => {
-      this.#port?.write(data, (error) => {
+      this.#writeStream?.write(data, "utf8", (error) => {
         if (error) {
           reject(error);
           return;
         }
-        this.#port?.drain((drainError) => {
-          if (drainError) {
-            reject(drainError);
-            return;
-          }
-          resolve();
-        });
+        resolve();
       });
     });
   }
