@@ -198,7 +198,7 @@ export class Ec200ModemProvider implements ModemProvider {
       };
 
       await this.#initializeModem();
-      await this.#refreshStatus();
+      await this.#refreshStatusInternal();
       logger.info("Modem initialization completed.", {
         portPath: this.#portPath,
       });
@@ -261,7 +261,7 @@ export class Ec200ModemProvider implements ModemProvider {
   async getStatus(): Promise<ModemStatus> {
     if (this.#readStream && this.#writeStream) {
       try {
-        await this.#refreshStatus();
+        await this.#enqueue(() => this.#refreshStatusInternal());
       } catch (error) {
         const details = error instanceof Error ? error.message : String(error);
         this.#debugLog("Status refresh failed", details);
@@ -276,19 +276,7 @@ export class Ec200ModemProvider implements ModemProvider {
   }
 
   async setDataEnabled(enabled: boolean): Promise<void> {
-    if (enabled) {
-      await this.#sendCommand(`AT+CGDCONT=1,"IP","${this.#apnName}"`);
-      await this.#sendCommand(
-        `AT+QICSGP=1,1,"${this.#apnName}","${this.#apnUser ?? ""}","${this.#apnPass ?? ""}",1`,
-      );
-      await this.#sendCommand("AT+CGATT=1");
-      await this.#sendCommand("AT+CGACT=1,1");
-    } else {
-      await this.#sendCommand("AT+CGACT=0,1");
-      await this.#sendCommand("AT+CGATT=0");
-    }
-
-    await this.#refreshStatus();
+    await this.#enqueue(() => this.#setDataEnabledInternal(enabled));
   }
 
   async waitForDataReady(timeoutMs: number): Promise<void> {
@@ -347,7 +335,7 @@ export class Ec200ModemProvider implements ModemProvider {
       throw new Error(`Unsupported keepalive URL protocol: ${parsedUrl.protocol}`);
     }
 
-    await this.#refreshStatus();
+    await this.#refreshStatusInternal();
     const originalDataAttached = this.#status.dataAttached;
     const originalPdpActive = this.#status.pdpActive;
     const responseTimeoutSeconds = this.#toCommandTimeoutSeconds(timeoutMs);
@@ -414,7 +402,7 @@ export class Ec200ModemProvider implements ModemProvider {
       }
 
       try {
-        await this.#refreshStatus();
+        await this.#refreshStatusInternal();
       } catch {
         this.#markDisconnected();
       }
@@ -422,6 +410,53 @@ export class Ec200ModemProvider implements ModemProvider {
       if (!requestError && cleanupError) {
         throw cleanupError;
       }
+    }
+  }
+
+  async #setDataEnabledInternal(enabled: boolean): Promise<void> {
+    await this.#refreshStatusInternal();
+    const alreadyEnabled = this.#status.dataAttached && this.#status.pdpActive;
+    const alreadyDisabled = !this.#status.dataAttached && !this.#status.pdpActive;
+
+    if (enabled && alreadyEnabled) {
+      logger.info("Data session is already enabled.");
+      return;
+    }
+
+    if (!enabled && alreadyDisabled) {
+      logger.info("Data session is already disabled.");
+      return;
+    }
+
+    logger.info("Updating modem data state.", {
+      enabled,
+      dataAttached: this.#status.dataAttached,
+      pdpActive: this.#status.pdpActive,
+    });
+
+    if (enabled) {
+      await this.#sendCommandInternal(`AT+CGDCONT=1,"IP","${this.#apnName}"`);
+      await this.#sendCommandInternal(
+        `AT+QICSGP=1,1,"${this.#apnName}","${this.#apnUser ?? ""}","${this.#apnPass ?? ""}",1`,
+      );
+      await this.#sendCommandInternal("AT+CGATT=1");
+      await this.#sendCommandInternal("AT+CGACT=1,1");
+      await this.#refreshStatusInternal();
+
+      if (!this.#status.dataAttached || !this.#status.pdpActive) {
+        throw new Error("Failed to enable modem data session");
+      }
+      return;
+    }
+
+    await this.#sendOptionalCommandInternal("AT+CGACT=0,1");
+    await this.#sendOptionalCommandInternal("AT+QIDEACT=1");
+    await this.#sendOptionalCommandInternal(`AT+QIDEACT=${KEEPALIVE_CONTEXT_ID}`);
+    await this.#sendOptionalCommandInternal("AT+CGATT=0");
+    await this.#refreshStatusInternal();
+
+    if (this.#status.dataAttached || this.#status.pdpActive) {
+      throw new Error("Failed to disable modem data session");
     }
   }
 
@@ -513,15 +548,15 @@ export class Ec200ModemProvider implements ModemProvider {
     }
   }
 
-  async #refreshStatus(): Promise<void> {
-    const cpin = await this.#sendCommand("AT+CPIN?");
-    const csq = await this.#sendCommand("AT+CSQ");
-    const creg = await this.#sendCommand("AT+CREG?");
-    const cgatt = await this.#sendCommand("AT+CGATT?");
-    const cgpaddr = await this.#sendCommand("AT+CGPADDR=1");
-    const cops = await this.#sendCommand("AT+COPS?");
-    const ati = await this.#sendCommand("ATI");
-    const cnum = await this.#sendOptionalCommand("AT+CNUM");
+  async #refreshStatusInternal(): Promise<void> {
+    const cpin = await this.#sendCommandInternal("AT+CPIN?");
+    const csq = await this.#sendCommandInternal("AT+CSQ");
+    const creg = await this.#sendCommandInternal("AT+CREG?");
+    const cgatt = await this.#sendCommandInternal("AT+CGATT?");
+    const cgpaddr = await this.#sendCommandInternal("AT+CGPADDR=1");
+    const cops = await this.#sendCommandInternal("AT+COPS?");
+    const ati = await this.#sendCommandInternal("ATI");
+    const cnum = await this.#sendOptionalCommandInternal("AT+CNUM");
 
     const signalMatch = csq.join("\n").match(/\+CSQ:\s*(\d+),/);
     const registrationMatch = creg.join("\n").match(/\+CREG:\s*\d,(\d)/);

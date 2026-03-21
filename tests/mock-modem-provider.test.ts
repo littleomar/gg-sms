@@ -57,4 +57,15 @@ describe("MockModemProvider", () => {
     expect(status.pdpActive).toBe(true);
     expect(status.ipAddress).toBe("10.0.0.2");
   });
+
+  it("allows disabling data when it is already off", async () => {
+    const modem = new MockModemProvider();
+
+    await modem.setDataEnabled(false);
+    const status = await modem.getStatus();
+
+    expect(status.dataAttached).toBe(false);
+    expect(status.pdpActive).toBe(false);
+    expect(status.ipAddress).toBeNull();
+  });
 });
