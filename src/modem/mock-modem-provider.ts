@@ -14,6 +14,7 @@ function nowIso(): string {
 export class MockModemProvider implements ModemProvider {
   #onInboundSms: ((message: InboundSms) => Promise<void> | void) | null = null;
   #pendingInbox: InboundSms[] = [];
+  #busy = false;
   #status: ModemStatus = {
     connected: true,
     simReady: true,
@@ -50,6 +51,10 @@ export class MockModemProvider implements ModemProvider {
     return this.#status;
   }
 
+  isBusy(): boolean {
+    return this.#busy;
+  }
+
   async setDataEnabled(enabled: boolean): Promise<void> {
     this.#status = {
       ...this.#status,
@@ -72,6 +77,7 @@ export class MockModemProvider implements ModemProvider {
 
   async performKeepaliveRequest(url: string, timeoutMs: number): Promise<KeepaliveRequestResult> {
     this.keepaliveRequests.push({ url, timeoutMs });
+    this.#busy = true;
     this.#status = {
       ...this.#status,
       dataAttached: true,
@@ -91,6 +97,7 @@ export class MockModemProvider implements ModemProvider {
         protocol: url.toLowerCase().startsWith("https://") ? "https" : "http",
       };
     } finally {
+      this.#busy = false;
       this.#status = {
         ...this.#status,
         dataAttached: false,

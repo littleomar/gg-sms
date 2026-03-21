@@ -45,6 +45,7 @@ export interface ModemProvider {
   drainInbox(): Promise<void>;
   stop(): Promise<void>;
   getStatus(): Promise<ModemStatus>;
+  isBusy(): boolean;
   setDataEnabled(enabled: boolean): Promise<void>;
   waitForDataReady(timeoutMs: number): Promise<void>;
   sendSms(input: OutboundSmsInput): Promise<OutboundSmsResult>;

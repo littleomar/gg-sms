@@ -121,6 +121,7 @@ export class Ec200ModemProvider implements ModemProvider {
   #pendingLineWaiters: PendingLineWaiter[] = [];
   #commandQueue = Promise.resolve();
   #onInboundSms: ((message: InboundSms) => Promise<void> | void) | null = null;
+  #busyOperation: "keepalive" | null = null;
   #status: ModemStatus = {
     connected: false,
     simReady: false,
@@ -178,10 +179,10 @@ export class Ec200ModemProvider implements ModemProvider {
         this.#handleChunk(typeof chunk === "string" ? chunk : chunk.toString("utf8")),
       );
       this.#readStream.on("error", () => {
-        this.#markDisconnected();
+        this.#handleTransportFailure("Modem read stream failed");
       });
       this.#writeStream.on("error", () => {
-        this.#markDisconnected();
+        this.#handleTransportFailure("Modem write stream failed");
       });
 
       this.#status = {
@@ -222,6 +223,9 @@ export class Ec200ModemProvider implements ModemProvider {
       return;
     }
 
+    this.#abortPendingOperations(new Error("Modem serial port closed"));
+    this.#busyOperation = null;
+
     this.#readStream?.destroy();
     this.#writeStream?.destroy();
     this.#readStream = null;
@@ -254,6 +258,10 @@ export class Ec200ModemProvider implements ModemProvider {
       }
     }
     return this.#status;
+  }
+
+  isBusy(): boolean {
+    return this.#busyOperation !== null;
   }
 
   async setDataEnabled(enabled: boolean): Promise<void> {
@@ -301,7 +309,12 @@ export class Ec200ModemProvider implements ModemProvider {
   }
 
   async performKeepaliveRequest(url: string, timeoutMs: number): Promise<KeepaliveRequestResult> {
-    return this.#enqueue(() => this.#performKeepaliveRequestInternal(url, timeoutMs));
+    this.#busyOperation = "keepalive";
+    try {
+      return await this.#enqueue(() => this.#performKeepaliveRequestInternal(url, timeoutMs));
+    } finally {
+      this.#busyOperation = null;
+    }
   }
 
   async #performKeepaliveRequestInternal(url: string, timeoutMs: number): Promise<KeepaliveRequestResult> {
@@ -434,6 +447,27 @@ export class Ec200ModemProvider implements ModemProvider {
       connected: false,
       lastUpdatedAt: nowIso(),
     };
+  }
+
+  #handleTransportFailure(message: string): void {
+    this.#markDisconnected();
+    this.#abortPendingOperations(new Error(message));
+  }
+
+  #abortPendingOperations(error: Error): void {
+    const pending = this.#pendingResponse;
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.#pendingResponse = null;
+      pending.reject(error);
+    }
+
+    const waiters = this.#pendingLineWaiters;
+    this.#pendingLineWaiters = [];
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
   }
 
   async #refreshStatus(): Promise<void> {
@@ -611,8 +645,9 @@ export class Ec200ModemProvider implements ModemProvider {
       return;
     }
 
+    const waiterMatched = this.#resolveLineWaiter(line);
     const pending = this.#pendingResponse;
-    if (!pending && this.#resolveLineWaiter(line)) {
+    if (!pending && waiterMatched) {
       return;
     }
 

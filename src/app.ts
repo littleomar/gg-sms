@@ -159,6 +159,10 @@ export class GgSmsApp {
       return;
     }
 
+    if (this.#modem.isBusy()) {
+      return;
+    }
+
     if (!this.#modemStarted) {
       await this.#ensureModemStarted("poll");
       return;
