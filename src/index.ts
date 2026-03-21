@@ -4,6 +4,7 @@ import { GgSmsApp } from "./app";
 const config = loadConfig();
 const app = new GgSmsApp(config);
 
+console.log("Starting gg-sms...");
 await app.start();
 console.log(`gg-sms started with modem port ${config.modemPort}`);
 

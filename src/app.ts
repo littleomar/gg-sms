@@ -8,6 +8,26 @@ import type { ModemProvider } from "./modem/types";
 import { DraftSessionService } from "./sms/draft-session-service";
 import { AppDatabase, DatabaseDraftSessionStore } from "./storage/database";
 
+const STARTUP_STEP_TIMEOUT_MS = 30_000;
+
+async function withTimeout<T>(label: string, operation: Promise<T>, timeoutMs = STARTUP_STEP_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 export class GgSmsApp {
   readonly #config: AppConfig;
   readonly #database: AppDatabase;
@@ -60,10 +80,13 @@ export class GgSmsApp {
   }
 
   async start(): Promise<void> {
-    await this.#bot.start();
+    console.log("Starting Telegram bot...");
+    await withTimeout("Telegram bot startup", this.#bot.start());
+    console.log("Telegram bot started.");
 
     try {
-      await this.#modem.start(async (message) => {
+      console.log(`Starting modem on ${this.#config.modemPort}...`);
+      await withTimeout("Modem startup", this.#modem.start(async (message) => {
         const storedMessage = this.#database.insertInboundSms(message);
         try {
           await this.#bot.pushInboundSms(storedMessage.id);
@@ -76,14 +99,17 @@ export class GgSmsApp {
             error: details,
           });
         }
-      });
+      }));
+      console.log("Modem started.");
     } catch (error) {
       await this.#bot.stop("startup_failed");
       throw error;
     }
 
     try {
-      await this.#modem.drainInbox();
+      console.log("Scanning modem inbox for unread SMS...");
+      await withTimeout("Modem inbox scan", this.#modem.drainInbox());
+      console.log("Modem inbox scan completed.");
     } catch (error) {
       const details = error instanceof Error ? error.message : String(error);
       console.error(`Failed to drain modem inbox during startup: ${details}`);
