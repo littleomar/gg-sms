@@ -124,6 +124,7 @@ export class TelegramBotService {
   readonly #accountProvider: AccountProvider;
   readonly #keepaliveJob: KeepaliveJob;
   readonly #chatId: string;
+  #pollingTask: Promise<void> | null = null;
 
   constructor(options: {
     botToken: string;
@@ -156,11 +157,27 @@ export class TelegramBotService {
   }
 
   async start(): Promise<void> {
-    await this.#bot.launch();
+    const botInfo = await this.#bot.telegram.getMe();
+    this.#bot.botInfo = botInfo;
+    await this.#bot.telegram.deleteWebhook();
+
+    const internalBot = this.#bot as any;
+    this.#pollingTask = (internalBot.startPolling as (allowedUpdates?: string[]) => Promise<void>)([]).catch((error: unknown) => {
+      const details = error instanceof Error ? error.message : String(error);
+      console.error(`Telegram polling stopped: ${details}`);
+      throw error;
+    });
   }
 
   async stop(reason = "shutdown"): Promise<void> {
-    await this.#bot.stop(reason);
+    try {
+      await this.#bot.stop(reason);
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      if (!details.includes("Bot is not running")) {
+        throw error;
+      }
+    }
   }
 
   async pushInboundSms(messageId: number): Promise<void> {
