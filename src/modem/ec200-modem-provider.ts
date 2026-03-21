@@ -347,10 +347,19 @@ export class Ec200ModemProvider implements ModemProvider {
       throw new Error(`Unsupported keepalive URL protocol: ${parsedUrl.protocol}`);
     }
 
+    await this.#refreshStatus();
+    const originalDataAttached = this.#status.dataAttached;
+    const originalPdpActive = this.#status.pdpActive;
     const responseTimeoutSeconds = this.#toCommandTimeoutSeconds(timeoutMs);
     let responseLengthHint: number | null = null;
+    let requestError: Error | null = null;
 
     try {
+      logger.info("Preparing keepalive data session.", {
+        originalDataAttached,
+        originalPdpActive,
+        protocol,
+      });
       await this.#sendCommandInternal(`AT+QICSGP=${KEEPALIVE_CONTEXT_ID},1,"${this.#apnName}","${this.#apnUser ?? ""}","${this.#apnPass ?? ""}",1`);
       await this.#sendCommandInternal("AT+CGATT=1");
       await this.#sendCommandInternal(`AT+QHTTPCFG="contextid",${KEEPALIVE_CONTEXT_ID}`);
@@ -387,12 +396,31 @@ export class Ec200ModemProvider implements ModemProvider {
         responseLength,
         protocol,
       };
+    } catch (error) {
+      requestError = error instanceof Error ? error : new Error(String(error));
+      throw requestError;
     } finally {
-      await this.#cleanupKeepaliveSessionInternal();
+      let cleanupError: Error | null = null;
+      try {
+        await this.#cleanupKeepaliveSessionInternal({
+          restoreDetached: !originalDataAttached,
+        });
+      } catch (error) {
+        cleanupError = error instanceof Error ? error : new Error(String(error));
+        logger.error("Failed to restore modem state after keepalive.", {
+          error: cleanupError,
+          restoreDetached: !originalDataAttached,
+        });
+      }
+
       try {
         await this.#refreshStatus();
       } catch {
         this.#markDisconnected();
+      }
+
+      if (!requestError && cleanupError) {
+        throw cleanupError;
       }
     }
   }
@@ -566,9 +594,13 @@ export class Ec200ModemProvider implements ModemProvider {
     return responseLengthHint ?? readResult.responseLength ?? 0;
   }
 
-  async #cleanupKeepaliveSessionInternal(): Promise<void> {
+  async #cleanupKeepaliveSessionInternal(options: { restoreDetached: boolean }): Promise<void> {
     await this.#sendOptionalCommandInternal("AT+QHTTPSTOP");
     await this.#sendOptionalCommandInternal(`AT+QIDEACT=${KEEPALIVE_CONTEXT_ID}`);
+    if (options.restoreDetached) {
+      logger.info("Restoring modem data state to detached after keepalive.");
+      await this.#sendCommandInternal("AT+CGATT=0");
+    }
   }
 
   #parseKeepaliveStatusLine(line: string, prefix: string): {

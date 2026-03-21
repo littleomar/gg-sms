@@ -52,6 +52,28 @@ describe("KeepaliveJob", () => {
     database.close();
   });
 
+  it("preserves an already enabled data session after keepalive", async () => {
+    const modem = new MockModemProvider();
+    await modem.setDataEnabled(true);
+
+    const database = createDatabase();
+    const job = new KeepaliveJob({
+      modem,
+      database,
+      keepaliveUrl: "https://example.com/generate_204",
+      timeoutMs: 5_000,
+    });
+
+    const result = await job.run();
+    const status = await modem.getStatus();
+
+    expect(result.ok).toBe(true);
+    expect(status.dataAttached).toBe(true);
+    expect(status.pdpActive).toBe(true);
+    expect(status.ipAddress).toBe("10.0.0.2");
+    database.close();
+  });
+
   it("records failures from the modem keepalive transport", async () => {
     const modem = new MockModemProvider();
     modem.keepaliveHandler = async () => {

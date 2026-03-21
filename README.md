@@ -67,7 +67,7 @@ bun test
 - `/account` 当前支持用 `GG_DASHBOARD_COOKIE` 或 TG 命令 `/accountcookie <cookie>` 直抓 giffgaff dashboard 余额。
 - EC200 驱动当前通过 `stty + /dev/tty*` 的 POSIX TTY 方式工作，真实部署前建议先在你的 FNOS + 模块环境上做一次串口和 AT 命令兼容验证。
 - 自动保号调度还没有实现，当前只支持手动执行 `/keepalive`。
-- `/keepalive` 现在通过 EC200 模块自身发起 HTTP(S) 请求，流量走 SIM 卡而不是宿主机默认网络；为兼容性，模块侧 HTTPS 默认关闭证书校验。
+- `/keepalive` 现在通过 EC200 模块自身发起 HTTP(S) 请求，流量走 SIM 卡而不是宿主机默认网络；如果执行前数据原本关闭，会在 keepalive 时自动临时打开并在完成后恢复关闭。为兼容性，模块侧 HTTPS 默认关闭证书校验。
 
 ## 本地开发提示
 

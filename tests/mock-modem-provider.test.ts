@@ -45,4 +45,16 @@ describe("MockModemProvider", () => {
     expect(status.dataAttached).toBe(false);
     expect(status.pdpActive).toBe(false);
   });
+
+  it("restores a previously enabled data session after keepalive", async () => {
+    const modem = new MockModemProvider();
+    await modem.setDataEnabled(true);
+
+    await modem.performKeepaliveRequest("https://example.com/generate_204", 5_000);
+    const status = await modem.getStatus();
+
+    expect(status.dataAttached).toBe(true);
+    expect(status.pdpActive).toBe(true);
+    expect(status.ipAddress).toBe("10.0.0.2");
+  });
 });

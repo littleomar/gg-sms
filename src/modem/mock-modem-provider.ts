@@ -92,6 +92,11 @@ export class MockModemProvider implements ModemProvider {
     this.keepaliveRequests.push({ url, timeoutMs });
     this.#busy = true;
     logger.info("Mock modem keepalive started.", { url, timeoutMs });
+    const previousStatus = {
+      dataAttached: this.#status.dataAttached,
+      pdpActive: this.#status.pdpActive,
+      ipAddress: this.#status.ipAddress,
+    };
     this.#status = {
       ...this.#status,
       dataAttached: true,
@@ -112,12 +117,16 @@ export class MockModemProvider implements ModemProvider {
       };
     } finally {
       this.#busy = false;
-      logger.info("Mock modem keepalive finished.", { url });
+      logger.info("Mock modem keepalive finished.", {
+        url,
+        restoreDataAttached: previousStatus.dataAttached,
+        restorePdpActive: previousStatus.pdpActive,
+      });
       this.#status = {
         ...this.#status,
-        dataAttached: false,
-        pdpActive: false,
-        ipAddress: null,
+        dataAttached: previousStatus.dataAttached,
+        pdpActive: previousStatus.pdpActive,
+        ipAddress: previousStatus.ipAddress,
         lastUpdatedAt: nowIso(),
       };
     }
