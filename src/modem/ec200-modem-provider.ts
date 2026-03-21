@@ -264,20 +264,38 @@ export class Ec200ModemProvider implements ModemProvider {
 
   async #configurePort(): Promise<void> {
     const sttyFlag = process.platform === "darwin" ? "-f" : "-F";
-    await execFileAsync("stty", [
-      sttyFlag,
-      this.#portPath,
-      String(this.#baudRate),
-      "raw",
-      "-echo",
-      "-ixon",
-      "-ixoff",
-      "cs8",
-      "-parenb",
-      "-cstopb",
-      "cread",
-      "clocal",
-    ]);
+    const commandGroups = [
+      [sttyFlag, this.#portPath, String(this.#baudRate)],
+      [sttyFlag, this.#portPath, "raw"],
+      [sttyFlag, this.#portPath, "-echo"],
+      [sttyFlag, this.#portPath, "-ixon"],
+      [sttyFlag, this.#portPath, "-ixoff"],
+      [sttyFlag, this.#portPath, "cs8"],
+      [sttyFlag, this.#portPath, "-parenb"],
+      [sttyFlag, this.#portPath, "-cstopb"],
+      [sttyFlag, this.#portPath, "cread"],
+      [sttyFlag, this.#portPath, "clocal"],
+    ];
+
+    const failures: string[] = [];
+    for (const args of commandGroups) {
+      try {
+        await execFileAsync("stty", args);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failures.push(`${args.slice(2).join(" ")} -> ${message}`);
+      }
+    }
+
+    if (failures.length > 0) {
+      console.warn(
+        [
+          `Warning: some stty options could not be applied to ${this.#portPath}.`,
+          "The modem may still work if the serial defaults already match the module.",
+          ...failures.map((failure) => `- ${failure}`),
+        ].join("\n"),
+      );
+    }
   }
 
   #markDisconnected(): void {
