@@ -1,5 +1,6 @@
+import { DashboardAccountProvider } from "./account/dashboard-account-provider";
+import type { AccountProvider } from "./account/provider";
 import type { AppConfig } from "./config";
-import { NotImplementedAccountProvider } from "./account/not-implemented-account-provider";
 import { TelegramBotService } from "./bot/telegram-bot";
 import { KeepaliveJob } from "./jobs/keepalive-job";
 import { Ec200ModemProvider } from "./modem/ec200-modem-provider";
@@ -32,7 +33,7 @@ export class GgSmsApp {
   readonly #config: AppConfig;
   readonly #database: AppDatabase;
   readonly #modem: ModemProvider;
-  readonly #accountProvider: NotImplementedAccountProvider;
+  readonly #accountProvider: AccountProvider;
   readonly #draftSessions: DraftSessionService;
   readonly #keepaliveJob: KeepaliveJob;
   readonly #bot: TelegramBotService;
@@ -58,7 +59,13 @@ export class GgSmsApp {
             debug: config.modemDebug,
           });
 
-    this.#accountProvider = new NotImplementedAccountProvider(this.#database);
+    this.#accountProvider = new DashboardAccountProvider({
+      database: this.#database,
+      bootstrapCookie: config.accountDashboardCookie,
+      dashboardUrl: config.accountDashboardUrl,
+      acceptLanguage: config.accountDashboardAcceptLanguage,
+      userAgent: config.accountDashboardUserAgent,
+    });
     this.#draftSessions = new DraftSessionService({
       store: new DatabaseDraftSessionStore(this.#database),
       ttlMs: config.smsDraftTtlMs,

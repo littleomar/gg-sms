@@ -16,7 +16,8 @@ const BOT_MENU_COMMANDS = [
   { command: "data", description: "控制数据会话: /data on|off" },
   { command: "sms", description: "新建短信草稿或查看 inbox" },
   { command: "keepalive", description: "执行一次最小流量保号" },
-  { command: "account", description: "账户模块占位回复" },
+  { command: "account", description: "刷新并查看账户信息" },
+  { command: "accountcookie", description: "设置 giffgaff dashboard cookie" },
 ] as const;
 
 function escapeHtml(input: string): string {
@@ -66,7 +67,9 @@ function formatHelpText(): string {
     "/sms - 新建短信草稿",
     "/sms inbox [n] - 查看最近短信",
     "/keepalive - 执行一次最小流量保号",
-    "/account - 账户模块占位回复",
+    "/account - 刷新并查看账户信息",
+    "/accountcookie <cookie> - 设置 dashboard cookie",
+    "/accountcookie clear - 清除 dashboard cookie",
     "",
     "发送短信说明",
     "1. 使用 /sms 新建草稿，或点击入站短信上的 Reply。",
@@ -95,6 +98,15 @@ function parseCommandArgs(text: string | undefined): string[] {
     return [];
   }
   return text.trim().split(/\s+/);
+}
+
+function getCommandRemainder(text: string | undefined): string {
+  if (!text) {
+    return "";
+  }
+
+  const match = text.trim().match(/^\/\S+(?:@\S+)?(?:\s+([\s\S]*))?$/);
+  return match?.[1]?.trim() ?? "";
 }
 
 function parseCallback(data: string | undefined): { type: string; action: string; value: string } | null {
@@ -277,10 +289,59 @@ export class TelegramBotService {
 
     this.#bot.command("account", async (ctx) => {
       await this.#accountProvider.recordAttempt();
-      const summary = await this.#accountProvider.getSummary();
-      await ctx.reply(
-        `${formatAccountSummary(summary)}\n\n/account 当前仅为占位接口，等待后续调研后接入真实账户查询模块。`,
-      );
+
+      try {
+        const summary = await this.#accountProvider.refresh();
+        const suffix =
+          summary.implementationStatus === "not_implemented"
+            ? "\n\n/account 当前仅为占位接口，等待后续调研后接入真实账户查询模块。"
+            : "\n\n账户信息已从 giffgaff dashboard 刷新。";
+        await ctx.reply(`${formatAccountSummary(summary)}${suffix}`);
+      } catch (error) {
+        const details = error instanceof Error ? error.message : String(error);
+        this.#database.insertAlert("error", "account_refresh_failed", "Account refresh failed.", {
+          error: details,
+        });
+        await ctx.reply(`账户刷新失败: ${details}`);
+      }
+    });
+
+    this.#bot.command("accountcookie", async (ctx) => {
+      const text = "message" in ctx && "text" in ctx.message ? ctx.message.text : undefined;
+      const rawCookie = getCommandRemainder(text);
+
+      if (!rawCookie) {
+        await ctx.reply(
+          [
+            "请使用 /accountcookie <cookie> 设置 giffgaff dashboard cookie。",
+            "如果要清除已保存的 cookie，请使用 /accountcookie clear。",
+          ].join("\n"),
+        );
+        return;
+      }
+
+      if (rawCookie.toLowerCase() === "clear") {
+        this.#database.setAccountDashboardCookie(null);
+        await safeDeleteMessage(ctx);
+        await ctx.reply("dashboard cookie 已清除。");
+        return;
+      }
+
+      this.#database.setAccountDashboardCookie(rawCookie);
+      await safeDeleteMessage(ctx);
+
+      try {
+        const summary = await this.#accountProvider.refresh();
+        await ctx.reply(
+          `dashboard cookie 已保存并验证成功。\n\n${formatAccountSummary(summary)}`,
+        );
+      } catch (error) {
+        const details = error instanceof Error ? error.message : String(error);
+        this.#database.insertAlert("warning", "account_cookie_validation_failed", "Dashboard cookie validation failed.", {
+          error: details,
+        });
+        await ctx.reply(`dashboard cookie 已保存，但验证失败: ${details}`);
+      }
     });
 
     this.#bot.command("sms", async (ctx) => {

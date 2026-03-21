@@ -12,4 +12,5 @@ export type AccountSummary = {
 export interface AccountProvider {
   getSummary(): Promise<AccountSummary>;
   recordAttempt(): Promise<void>;
+  refresh(): Promise<AccountSummary>;
 }

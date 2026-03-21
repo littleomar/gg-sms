@@ -50,4 +50,14 @@ describe("NotImplementedAccountProvider", () => {
     expect(summary.lastAttemptAt).not.toBeNull();
     database.close();
   });
+
+  it("keeps the placeholder contract when refresh is called", async () => {
+    const database = createDatabase();
+    const provider = new NotImplementedAccountProvider(database);
+
+    const summary = await provider.refresh();
+
+    expect(summary.implementationStatus).toBe("not_implemented");
+    database.close();
+  });
 });

@@ -48,6 +48,10 @@ bun test
 - `BOT_ADMIN_ID`: 唯一允许操作 bot 的 Telegram user/chat id
 - `BOT_NOTIFY_CHAT_ID`: 主动推送短信和告警的目标 chat id；不填时默认沿用管理员最近一次实际使用 bot 的 chat
 - `TELEGRAM_PROXY_URL`: Telegram 出口代理地址，支持 `http://`、`https://`、`socks://`、`socks5://` 等 URL；中国大陆环境下通常需要配置
+- `GG_DASHBOARD_COOKIE`: giffgaff dashboard 登录后的完整 Cookie 串；只用于 `/account`，不要提交到 git
+- `GG_DASHBOARD_URL`: dashboard 页面地址，默认 `https://www.giffgaff.com/dashboard`
+- `GG_DASHBOARD_ACCEPT_LANGUAGE`: `/account` 抓取时使用的 `Accept-Language`
+- `GG_DASHBOARD_USER_AGENT`: `/account` 抓取时使用的 `User-Agent`
 - `MODEM_DEBUG`: 设为 `1` 后输出 modem AT 命令、串口返回和入站短信处理日志，排查收短信问题时很有用
 - `SMS_SEND_PASSWORD`: 每次发送短信都要输入的密码
 - `MODEM_PORT`: EC200 串口，例如 `/dev/ttyUSB2`
@@ -59,7 +63,7 @@ bun test
 
 ## 当前限制
 
-- `/account` 还没有接入真实的 Playwright 或 API 抓取逻辑，目前只返回占位信息，并记录最近一次尝试时间。
+- `/account` 当前支持用 `GG_DASHBOARD_COOKIE` 或 TG 命令 `/accountcookie <cookie>` 直抓 giffgaff dashboard 余额。
 - EC200 驱动当前通过 `stty + /dev/tty*` 的 POSIX TTY 方式工作，真实部署前建议先在你的 FNOS + 模块环境上做一次串口和 AT 命令兼容验证。
 - 自动保号调度还没有实现，当前只支持手动执行 `/keepalive`。
 
@@ -68,3 +72,4 @@ bun test
 - 如果你只想先调试 bot 和流程，可以把 `MODEM_PORT=mock`，这会启用内置的 mock modem，不依赖真实硬件。
 - 如果宿主机无法直连 Telegram Bot API，请配置 `TELEGRAM_PROXY_URL`，例如 `socks5://127.0.0.1:7890`。
 - 如果怀疑短信没有被读取到，可以临时设置 `MODEM_DEBUG=1`，再观察是否出现 `+CMTI`、`AT+CMGR`、启动时 inbox scan，以及后台轮询日志。
+- 如果你想直接在 TG 里更新 dashboard 登录态，可以发送 `/accountcookie <cookie>`；bot 会尽量删除原始消息，降低 cookie 暴露时间。

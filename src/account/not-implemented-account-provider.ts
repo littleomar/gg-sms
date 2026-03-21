@@ -23,4 +23,8 @@ export class NotImplementedAccountProvider implements AccountProvider {
   async recordAttempt(): Promise<void> {
     this.#database.recordAccountAttempt(new Date().toISOString());
   }
+
+  async refresh(): Promise<AccountSummary> {
+    return this.getSummary();
+  }
 }

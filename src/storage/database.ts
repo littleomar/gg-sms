@@ -52,6 +52,12 @@ type TrackingRow = {
   tracking_status: AccountTrackingState["trackingStatus"];
 };
 
+type BotRuntimeRow = {
+  notify_chat_id: string | null;
+  account_dashboard_cookie: string | null;
+  account_dashboard_cookie_updated_at: string | null;
+};
+
 export class AppDatabase {
   readonly #db: Database;
 
@@ -150,6 +156,9 @@ export class AppDatabase {
         payload_json TEXT
       );
     `);
+
+    this.#ensureBotRuntimeColumn("account_dashboard_cookie", "TEXT");
+    this.#ensureBotRuntimeColumn("account_dashboard_cookie_updated_at", "TEXT");
   }
 
   insertInboundSms(message: InboundSms): StoredSmsMessage {
@@ -333,13 +342,66 @@ export class AppDatabase {
     `).run(atIso);
   }
 
+  insertAccountSnapshot(input: {
+    fetchedAt: string;
+    airtimeCreditAmount: string | null;
+    planSummary?: string | null;
+    dataRemaining?: string | null;
+    validUntil?: string | null;
+    rawSnapshot?: string | null;
+  }): void {
+    this.#db.query(`
+      INSERT INTO account_snapshots (
+        fetched_at,
+        airtime_credit_amount,
+        plan_summary,
+        data_remaining,
+        valid_until,
+        raw_snapshot
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      input.fetchedAt,
+      input.airtimeCreditAmount,
+      input.planSummary ?? null,
+      input.dataRemaining ?? null,
+      input.validUntil ?? null,
+      input.rawSnapshot ?? null,
+    );
+  }
+
+  updateAccountTrackingState(input: {
+    lastAccountSyncAt: string;
+    lastKnownAirtimeCredit: string | null;
+    lastBalanceChangeAt: string | null;
+    nextKeepaliveDeadlineAt: string | null;
+    trackingStatus: AccountTrackingState["trackingStatus"];
+  }): void {
+    this.#db.query(`
+      UPDATE account_tracking_state
+      SET
+        last_account_sync_at = ?,
+        last_known_airtime_credit = ?,
+        last_balance_change_at = ?,
+        next_keepalive_deadline_at = ?,
+        tracking_status = ?
+      WHERE singleton_id = 1
+    `).run(
+      input.lastAccountSyncAt,
+      input.lastKnownAirtimeCredit,
+      input.lastBalanceChangeAt,
+      input.nextKeepaliveDeadlineAt,
+      input.trackingStatus,
+    );
+  }
+
   getNotifyChatId(): string | null {
     const row = this.#db.query(`
-      SELECT notify_chat_id
+      SELECT notify_chat_id, account_dashboard_cookie, account_dashboard_cookie_updated_at
       FROM bot_runtime_state
       WHERE singleton_id = 1
       LIMIT 1
-    `).get() as { notify_chat_id: string | null };
+    `).get() as BotRuntimeRow;
 
     return row.notify_chat_id;
   }
@@ -350,6 +412,38 @@ export class AppDatabase {
       SET notify_chat_id = ?
       WHERE singleton_id = 1
     `).run(chatId);
+  }
+
+  getAccountDashboardCookie(): string | null {
+    const row = this.#db.query(`
+      SELECT notify_chat_id, account_dashboard_cookie, account_dashboard_cookie_updated_at
+      FROM bot_runtime_state
+      WHERE singleton_id = 1
+      LIMIT 1
+    `).get() as BotRuntimeRow;
+
+    return row.account_dashboard_cookie;
+  }
+
+  setAccountDashboardCookie(cookie: string | null, updatedAtIso = new Date().toISOString()): void {
+    this.#db.query(`
+      UPDATE bot_runtime_state
+      SET
+        account_dashboard_cookie = ?,
+        account_dashboard_cookie_updated_at = ?
+      WHERE singleton_id = 1
+    `).run(cookie, cookie ? updatedAtIso : null);
+  }
+
+  getAccountDashboardCookieUpdatedAt(): string | null {
+    const row = this.#db.query(`
+      SELECT notify_chat_id, account_dashboard_cookie, account_dashboard_cookie_updated_at
+      FROM bot_runtime_state
+      WHERE singleton_id = 1
+      LIMIT 1
+    `).get() as BotRuntimeRow;
+
+    return row.account_dashboard_cookie_updated_at;
   }
 
   startJobRun(jobName: string): number {
@@ -408,6 +502,15 @@ export class AppDatabase {
       expiresAt: row.expires_at,
       sourceMessageId: row.source_message_id,
     };
+  }
+
+  #ensureBotRuntimeColumn(columnName: string, definition: string): void {
+    const columns = this.#db.query(`PRAGMA table_info(bot_runtime_state)`).all() as Array<{ name: string }>;
+    if (columns.some((column) => column.name === columnName)) {
+      return;
+    }
+
+    this.#db.exec(`ALTER TABLE bot_runtime_state ADD COLUMN ${columnName} ${definition}`);
   }
 }
 
