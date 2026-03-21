@@ -5,6 +5,7 @@ import type { KeepaliveJob } from "../jobs/keepalive-job";
 import { createLogger } from "../logger";
 import type { ModemProvider } from "../modem/types";
 import { applyTelegramProxyEnvironment, createTelegramProxyAgent } from "./proxy-agent";
+import { canUseBunFetchTelegramProxy, createBunTelegramCallApi } from "./telegram-transport";
 import { isAdminUser } from "./auth";
 import type { DraftSessionService } from "../sms/draft-session-service";
 import type { AppDatabase } from "../storage/database";
@@ -185,6 +186,35 @@ export class TelegramBotService {
         );
       }
     }
+
+    if (canUseBunFetchTelegramProxy(options.telegramProxyUrl)) {
+      const telegramClient = this.#bot.telegram as any;
+      const originalCallApi = telegramClient.callApi.bind(telegramClient);
+      const callApiViaBun = createBunTelegramCallApi({
+        botToken: options.botToken,
+        apiRoot: telegramClient.options.apiRoot,
+        apiMode: telegramClient.options.apiMode,
+        testEnv: telegramClient.options.testEnv,
+        proxyUrl: options.telegramProxyUrl!.trim(),
+      });
+
+      telegramClient.callApi = async (method: string, payload: Record<string, unknown>, apiOptions?: { signal?: AbortSignal }) => {
+        try {
+          return await callApiViaBun(method, payload, apiOptions);
+        } catch (error) {
+          logger.warn("Bun native Telegram proxy request failed; falling back to telegraf transport.", {
+            method,
+            error,
+          });
+          return originalCallApi(method, payload, apiOptions);
+        }
+      };
+
+      logger.info("Enabled Bun native Telegram API proxy transport.", {
+        proxyProtocol: proxyConfiguration.protocol,
+      });
+    }
+
     this.#adminId = options.adminId;
     this.#modem = options.modem;
     this.#database = options.database;

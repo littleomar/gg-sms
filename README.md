@@ -74,7 +74,7 @@ bun test
 - 如果你只想先调试 bot 和流程，可以把 `MODEM_PORT=mock`，这会启用内置的 mock modem，不依赖真实硬件。
 - 如果需要更详细的运行日志，可以把 `LOG_LEVEL=debug`；如果还要看原始 AT 收发，再额外设置 `MODEM_DEBUG=1`。
 - 如果宿主机无法直连 Telegram Bot API，请配置 `TELEGRAM_PROXY_URL`，例如 `socks5://127.0.0.1:7890`。
-- 在 Bun 环境下，`TELEGRAM_PROXY_URL` 如果使用 `http://` 或 `https://` 代理会更稳，因为程序会同时写入 `ALL_PROXY/HTTP_PROXY/HTTPS_PROXY` 作为 Bun 的兼容兜底；`socks5://` 会继续尝试走 `ProxyAgent`，但兼容性取决于当前 Bun 版本。
+- 在 Bun 环境下，`TELEGRAM_PROXY_URL` 如果使用 `http://` 或 `https://` 代理会更稳，因为程序会直接用 Bun 原生 `fetch(..., { proxy })` 访问 Telegram Bot API，同时写入 `ALL_PROXY/HTTP_PROXY/HTTPS_PROXY` 作为兜底；`socks5://` 会继续尝试走 `ProxyAgent`，但兼容性取决于当前 Bun 版本。
 - 如果怀疑短信没有被读取到，可以临时设置 `MODEM_DEBUG=1`，再观察是否出现 `+CMTI`、`AT+CMGR`、启动时 inbox scan，以及后台轮询日志。
 - 如果你想直接在 TG 里更新 dashboard 登录态，可以发送 `/accountcookie <cookie>`；bot 会尽量删除原始消息，降低 cookie 暴露时间。
 - 建议把 `KEEPALIVE_URL` 设成返回 `204` 或极小响应体的地址，这样模块侧 keepalive 消耗的 SIM 流量最少。
