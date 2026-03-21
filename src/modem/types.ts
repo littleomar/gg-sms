@@ -35,6 +35,7 @@ export type OutboundSmsResult = {
 
 export interface ModemProvider {
   start(onInboundSms: (message: InboundSms) => Promise<void> | void): Promise<void>;
+  drainInbox(): Promise<void>;
   stop(): Promise<void>;
   getStatus(): Promise<ModemStatus>;
   setDataEnabled(enabled: boolean): Promise<void>;

@@ -91,6 +91,7 @@ export class Ec200ModemProvider implements ModemProvider {
   readonly #apnPass?: string;
   readonly #simPin?: string;
   readonly #commandTimeoutMs: number;
+  readonly #debug: boolean;
   #readStream: ReadStream | null = null;
   #writeStream: WriteStream | null = null;
   #readFd: number | null = null;
@@ -120,6 +121,7 @@ export class Ec200ModemProvider implements ModemProvider {
     apnUser?: string;
     apnPass?: string;
     simPin?: string;
+    debug?: boolean;
     commandTimeoutMs?: number;
   }) {
     this.#portPath = options.portPath;
@@ -128,6 +130,7 @@ export class Ec200ModemProvider implements ModemProvider {
     this.#apnUser = options.apnUser;
     this.#apnPass = options.apnPass;
     this.#simPin = options.simPin;
+    this.#debug = options.debug ?? false;
     this.#commandTimeoutMs = options.commandTimeoutMs ?? 10_000;
   }
 
@@ -166,6 +169,25 @@ export class Ec200ModemProvider implements ModemProvider {
 
     await this.#initializeModem();
     await this.#refreshStatus();
+  }
+
+  async drainInbox(): Promise<void> {
+    this.#debugLog("Scanning modem inbox for unread SMS");
+    const lines = await this.#sendCommand('AT+CMGL="REC UNREAD"');
+    const indexes = lines
+      .map((line) => line.match(/^\+CMGL:\s*(\d+),/))
+      .filter((match): match is RegExpMatchArray => match !== null)
+      .map((match) => Number.parseInt(match[1], 10));
+
+    if (indexes.length === 0) {
+      this.#debugLog("No unread SMS found during startup scan");
+      return;
+    }
+
+    this.#debugLog(`Found ${indexes.length} unread SMS during startup scan: ${indexes.join(", ")}`);
+    for (const index of indexes) {
+      await this.#handleInboundMessage(index, "startup_scan");
+    }
   }
 
   async stop(): Promise<void> {
@@ -298,6 +320,14 @@ export class Ec200ModemProvider implements ModemProvider {
     }
   }
 
+  #debugLog(message: string, details?: string): void {
+    if (!this.#debug) {
+      return;
+    }
+
+    console.log(`[MODEM] ${message}${details ? `: ${details}` : ""}`);
+  }
+
   #markDisconnected(): void {
     this.#status = {
       ...this.#status,
@@ -338,8 +368,9 @@ export class Ec200ModemProvider implements ModemProvider {
     };
   }
 
-  async #handleInboundMessage(index: number): Promise<void> {
+  async #handleInboundMessage(index: number, source = "notification"): Promise<void> {
     try {
+      this.#debugLog("Reading inbound SMS", `index=${index}, source=${source}`);
       const lines = await this.#sendCommand(`AT+CMGR=${index}`);
       const header = lines.find((line) => line.startsWith("+CMGR:"));
       const body = lines.filter((line) => !line.startsWith("+CMGR:")).at(-1) ?? "";
@@ -352,14 +383,16 @@ export class Ec200ModemProvider implements ModemProvider {
         return;
       }
 
+      this.#debugLog("Inbound SMS parsed", `index=${index}, remote=${remoteNumber}, body=${maybeDecodeUcs2(body)}`);
       await this.#onInboundSms({
         remoteNumber,
         body: maybeDecodeUcs2(body),
         receivedAt: nowIso(),
         modemMessageId: String(index),
       });
-    } catch {
-      // Ignore malformed SMS notifications and continue listening.
+    } catch (error) {
+      const details = error instanceof Error ? error.message : "unknown error";
+      console.error(`Failed to process inbound SMS at index ${index}: ${details}`);
     }
   }
 
@@ -383,6 +416,7 @@ export class Ec200ModemProvider implements ModemProvider {
   }
 
   #handleLine(line: string): void {
+    this.#debugLog("RX", line);
     if (line.startsWith("+CMTI:")) {
       const match = line.match(/,(\d+)$/);
       if (match) {
@@ -419,6 +453,7 @@ export class Ec200ModemProvider implements ModemProvider {
 
   async #sendCommand(command: string): Promise<string[]> {
     return this.#enqueue(async () => {
+      this.#debugLog("TX", command);
       const responsePromise = new Promise<string[]>((resolve, reject) => {
         const timer = setTimeout(() => {
           this.#pendingResponse = null;
@@ -452,6 +487,7 @@ export class Ec200ModemProvider implements ModemProvider {
 
   async #sendSmsCommand(encodedNumber: string, payload: string): Promise<string[]> {
     const command = `AT+CMGS="${encodedNumber}"`;
+    this.#debugLog("TX", command);
     const responsePromise = new Promise<string[]>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pendingResponse = null;
@@ -478,6 +514,7 @@ export class Ec200ModemProvider implements ModemProvider {
             current.reject(new Error("Timed out waiting for modem final response"));
           }, this.#commandTimeoutMs);
 
+          this.#debugLog("TX", "<sms-body>");
           void this.#write(`${payload}${CTRL_Z}`).catch((error) => {
             const active = this.#pendingResponse;
             if (!active) {

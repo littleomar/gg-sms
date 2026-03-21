@@ -47,6 +47,7 @@ bun test
 - `BOT_TOKEN`: Telegram bot token
 - `BOT_ADMIN_ID`: 唯一允许操作 bot 的 Telegram user/chat id
 - `TELEGRAM_PROXY_URL`: Telegram 出口代理地址，支持 `http://`、`https://`、`socks://`、`socks5://` 等 URL；中国大陆环境下通常需要配置
+- `MODEM_DEBUG`: 设为 `1` 后输出 modem AT 命令、串口返回和入站短信处理日志，排查收短信问题时很有用
 - `SMS_SEND_PASSWORD`: 每次发送短信都要输入的密码
 - `MODEM_PORT`: EC200 串口，例如 `/dev/ttyUSB2`
 - `MODEM_BAUD`: 串口波特率，默认 `115200`
@@ -64,3 +65,4 @@ bun test
 
 - 如果你只想先调试 bot 和流程，可以把 `MODEM_PORT=mock`，这会启用内置的 mock modem，不依赖真实硬件。
 - 如果宿主机无法直连 Telegram Bot API，请配置 `TELEGRAM_PROXY_URL`，例如 `socks5://127.0.0.1:7890`。
+- 如果怀疑短信没有被读取到，可以临时设置 `MODEM_DEBUG=1`，再观察是否出现 `+CMTI`、`AT+CMGR` 和启动时 inbox scan 日志。

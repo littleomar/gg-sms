@@ -32,6 +32,7 @@ export class GgSmsApp {
             apnUser: config.apnUser,
             apnPass: config.apnPass,
             simPin: config.simPin,
+            debug: config.modemDebug,
           });
 
     this.#accountProvider = new NotImplementedAccountProvider(this.#database);
@@ -59,12 +60,37 @@ export class GgSmsApp {
   }
 
   async start(): Promise<void> {
-    await this.#modem.start(async (message) => {
-      const storedMessage = this.#database.insertInboundSms(message);
-      await this.#bot.pushInboundSms(storedMessage.id);
-    });
-
     await this.#bot.start();
+
+    try {
+      await this.#modem.start(async (message) => {
+        const storedMessage = this.#database.insertInboundSms(message);
+        try {
+          await this.#bot.pushInboundSms(storedMessage.id);
+        } catch (error) {
+          const details = error instanceof Error ? error.message : String(error);
+          console.error(`Failed to push inbound SMS ${storedMessage.id} to Telegram: ${details}`);
+          this.#database.insertAlert("error", "sms_push_failed", "Inbound SMS push to Telegram failed.", {
+            messageId: storedMessage.id,
+            remoteNumber: storedMessage.remoteNumber,
+            error: details,
+          });
+        }
+      });
+    } catch (error) {
+      await this.#bot.stop("startup_failed");
+      throw error;
+    }
+
+    try {
+      await this.#modem.drainInbox();
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      console.error(`Failed to drain modem inbox during startup: ${details}`);
+      this.#database.insertAlert("warning", "sms_drain_failed", "Startup inbox scan failed.", {
+        error: details,
+      });
+    }
   }
 
   async stop(): Promise<void> {

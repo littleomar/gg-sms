@@ -2,6 +2,7 @@ export type AppConfig = {
   botToken: string;
   botAdminId: string;
   telegramProxyUrl?: string;
+  modemDebug: boolean;
   smsSendPassword: string;
   modemPort: string;
   modemBaud: number;
@@ -17,6 +18,14 @@ export type AppConfig = {
 
 const DEFAULT_SMS_DRAFT_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_KEEPALIVE_TIMEOUT_MS = 15 * 1000;
+
+function parseBoolean(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
 
 function requireEnv(name: string, env: Record<string, string | undefined>): string {
   const value = env[name]?.trim();
@@ -57,6 +66,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     botToken: requireEnv("BOT_TOKEN", env),
     botAdminId: requireEnv("BOT_ADMIN_ID", env),
     telegramProxyUrl: parseOptional("TELEGRAM_PROXY_URL", env),
+    modemDebug: parseBoolean(env.MODEM_DEBUG),
     smsSendPassword: requireEnv("SMS_SEND_PASSWORD", env),
     modemPort: requireEnv("MODEM_PORT", env),
     modemBaud: parseNumber("MODEM_BAUD", env, 115200),

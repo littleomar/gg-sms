@@ -6,6 +6,7 @@ function nowIso(): string {
 
 export class MockModemProvider implements ModemProvider {
   #onInboundSms: ((message: InboundSms) => Promise<void> | void) | null = null;
+  #pendingInbox: InboundSms[] = [];
   #status: ModemStatus = {
     connected: true,
     simReady: true,
@@ -23,6 +24,14 @@ export class MockModemProvider implements ModemProvider {
 
   async start(onInboundSms: (message: InboundSms) => Promise<void> | void): Promise<void> {
     this.#onInboundSms = onInboundSms;
+  }
+
+  async drainInbox(): Promise<void> {
+    const pending = [...this.#pendingInbox];
+    this.#pendingInbox = [];
+    for (const message of pending) {
+      await this.#onInboundSms?.(message);
+    }
   }
 
   async stop(): Promise<void> {}
@@ -53,5 +62,9 @@ export class MockModemProvider implements ModemProvider {
 
   async emitInboundSms(message: InboundSms): Promise<void> {
     await this.#onInboundSms?.(message);
+  }
+
+  seedInbox(messages: InboundSms[]): void {
+    this.#pendingInbox.push(...messages);
   }
 }
