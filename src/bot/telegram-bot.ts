@@ -10,6 +10,15 @@ import type { AppDatabase } from "../storage/database";
 
 type AppContext = Context;
 
+const BOT_MENU_COMMANDS = [
+  { command: "help", description: "显示帮助" },
+  { command: "status", description: "查看 EC200 和账户状态" },
+  { command: "data", description: "控制数据会话: /data on|off" },
+  { command: "sms", description: "新建短信草稿或查看 inbox" },
+  { command: "keepalive", description: "执行一次最小流量保号" },
+  { command: "account", description: "账户模块占位回复" },
+] as const;
+
 function escapeHtml(input: string): string {
   return input
     .replaceAll("&", "&amp;")
@@ -168,6 +177,12 @@ export class TelegramBotService {
     const botInfo = await this.#bot.telegram.getMe();
     this.#bot.botInfo = botInfo;
     await this.#bot.telegram.deleteWebhook();
+    await this.#bot.telegram.setMyCommands(BOT_MENU_COMMANDS);
+    await this.#bot.telegram.setChatMenuButton({
+      menuButton: {
+        type: "commands",
+      },
+    });
 
     const internalBot = this.#bot as any;
     this.#pollingTask = (internalBot.startPolling as (allowedUpdates?: string[]) => Promise<void>)([]).catch((error: unknown) => {
