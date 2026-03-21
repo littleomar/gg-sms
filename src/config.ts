@@ -14,10 +14,12 @@ export type AppConfig = {
   keepaliveUrl: string;
   dbPath: string;
   smsDraftTtlMs: number;
+  smsPollIntervalMs: number;
   keepaliveTimeoutMs: number;
 };
 
 const DEFAULT_SMS_DRAFT_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_SMS_POLL_INTERVAL_MS = 15 * 1000;
 const DEFAULT_KEEPALIVE_TIMEOUT_MS = 15 * 1000;
 
 function parseBoolean(value: string | undefined): boolean {
@@ -79,6 +81,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     keepaliveUrl: requireEnv("KEEPALIVE_URL", env),
     dbPath: requireEnv("DB_PATH", env),
     smsDraftTtlMs: parseNumber("SMS_DRAFT_TTL_MS", env, DEFAULT_SMS_DRAFT_TTL_MS),
+    smsPollIntervalMs: parseNumber("SMS_POLL_INTERVAL_MS", env, DEFAULT_SMS_POLL_INTERVAL_MS),
     keepaliveTimeoutMs: parseNumber(
       "KEEPALIVE_TIMEOUT_MS",
       env,

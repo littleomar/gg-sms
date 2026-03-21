@@ -55,6 +55,7 @@ bun test
 - `APN_NAME`: giffgaff 数据 APN
 - `KEEPALIVE_URL`: 手动保号时访问的极小 HTTPS 地址
 - `DB_PATH`: SQLite 数据库路径
+- `SMS_POLL_INTERVAL_MS`: 后台未读短信轮询间隔，默认 `15000` 毫秒；设为 `0` 可关闭轮询兜底
 
 ## 当前限制
 
@@ -66,4 +67,4 @@ bun test
 
 - 如果你只想先调试 bot 和流程，可以把 `MODEM_PORT=mock`，这会启用内置的 mock modem，不依赖真实硬件。
 - 如果宿主机无法直连 Telegram Bot API，请配置 `TELEGRAM_PROXY_URL`，例如 `socks5://127.0.0.1:7890`。
-- 如果怀疑短信没有被读取到，可以临时设置 `MODEM_DEBUG=1`，再观察是否出现 `+CMTI`、`AT+CMGR` 和启动时 inbox scan 日志。
+- 如果怀疑短信没有被读取到，可以临时设置 `MODEM_DEBUG=1`，再观察是否出现 `+CMTI`、`AT+CMGR`、启动时 inbox scan，以及后台轮询日志。

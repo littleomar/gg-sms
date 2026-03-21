@@ -36,6 +36,9 @@ export class GgSmsApp {
   readonly #draftSessions: DraftSessionService;
   readonly #keepaliveJob: KeepaliveJob;
   readonly #bot: TelegramBotService;
+  #smsPollTimer: ReturnType<typeof setTimeout> | null = null;
+  #smsPollInFlight = false;
+  #stopping = false;
 
   constructor(config: AppConfig) {
     this.#config = config;
@@ -81,6 +84,8 @@ export class GgSmsApp {
   }
 
   async start(): Promise<void> {
+    this.#stopping = false;
+
     console.log("Starting Telegram bot...");
     await withTimeout("Telegram bot startup", this.#bot.start());
     console.log("Telegram bot started.");
@@ -118,13 +123,55 @@ export class GgSmsApp {
         error: details,
       });
     }
+
+    if (this.#config.smsPollIntervalMs > 0) {
+      console.log(`Starting background inbox polling every ${this.#config.smsPollIntervalMs}ms...`);
+      this.#scheduleSmsPoll();
+    }
   }
 
   async stop(): Promise<void> {
+    this.#stopping = true;
+    if (this.#smsPollTimer) {
+      clearTimeout(this.#smsPollTimer);
+      this.#smsPollTimer = null;
+    }
+
     await Promise.allSettled([
       this.#bot.stop(),
       this.#modem.stop(),
     ]);
     this.#database.close();
+  }
+
+  #scheduleSmsPoll(): void {
+    if (this.#stopping || this.#smsPollTimer || this.#config.smsPollIntervalMs <= 0) {
+      return;
+    }
+
+    this.#smsPollTimer = setTimeout(async () => {
+      this.#smsPollTimer = null;
+      await this.#runSmsPoll();
+      this.#scheduleSmsPoll();
+    }, this.#config.smsPollIntervalMs);
+  }
+
+  async #runSmsPoll(): Promise<void> {
+    if (this.#stopping || this.#smsPollInFlight) {
+      return;
+    }
+
+    this.#smsPollInFlight = true;
+    try {
+      await withTimeout("Modem inbox poll", this.#modem.drainInbox());
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      console.error(`Failed to poll modem inbox: ${details}`);
+      this.#database.insertAlert("warning", "sms_poll_failed", "Background inbox poll failed.", {
+        error: details,
+      });
+    } finally {
+      this.#smsPollInFlight = false;
+    }
   }
 }
