@@ -38,7 +38,7 @@ export function createBunTelegramCallApi(options: TelegramApiRequestOptions) {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        connection: "keep-alive",
+        connection: "close",
       },
       body: JSON.stringify(payload, replacer),
       signal: apiOptions.signal,
