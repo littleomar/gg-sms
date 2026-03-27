@@ -124,6 +124,7 @@ export class Ec200ModemProvider implements ModemProvider {
   #commandQueue = Promise.resolve();
   #onInboundSms: ((message: InboundSms) => Promise<void> | void) | null = null;
   #busyOperation: "keepalive" | null = null;
+  #ready = false;
   #status: ModemStatus = {
     connected: false,
     simReady: false,
@@ -199,6 +200,7 @@ export class Ec200ModemProvider implements ModemProvider {
 
       await this.#initializeModem();
       await this.#refreshStatusInternal();
+      this.#ready = true;
       logger.info("Modem initialization completed.", {
         portPath: this.#portPath,
       });
@@ -236,6 +238,7 @@ export class Ec200ModemProvider implements ModemProvider {
     logger.info("Closing modem serial connection.", { portPath: this.#portPath });
     this.#abortPendingOperations(new Error("Modem serial port closed"));
     this.#busyOperation = null;
+    this.#ready = false;
 
     this.#readStream?.destroy();
     this.#writeStream?.destroy();
@@ -259,7 +262,7 @@ export class Ec200ModemProvider implements ModemProvider {
   }
 
   async getStatus(): Promise<ModemStatus> {
-    if (this.#readStream && this.#writeStream) {
+    if (this.#ready && this.#readStream && this.#writeStream) {
       try {
         await this.#enqueue(() => this.#refreshStatusInternal());
       } catch (error) {
