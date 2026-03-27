@@ -4,7 +4,6 @@ import type { AccountProvider } from "../account/provider";
 import type { KeepaliveJob } from "../jobs/keepalive-job";
 import { createLogger } from "../logger";
 import type { ModemProvider } from "../modem/types";
-import { applyTelegramProxyEnvironment, createTelegramProxyAgent } from "./proxy-agent";
 import { canUseBunFetchTelegramProxy, createBunTelegramCallApi } from "./telegram-transport";
 import { isAdminUser } from "./auth";
 import type { DraftSessionService } from "../sms/draft-session-service";
@@ -165,54 +164,31 @@ export class TelegramBotService {
     keepaliveJob: KeepaliveJob;
     onRuntimeError?: (error: Error) => void;
   }) {
-    const proxyConfiguration = applyTelegramProxyEnvironment(options.telegramProxyUrl);
-    const proxyAgent = createTelegramProxyAgent(options.telegramProxyUrl);
-    this.#bot = new Telegraf<AppContext>(options.botToken, {
-      telegram: proxyAgent
-        ? {
-            agent: proxyAgent,
-            attachmentAgent: proxyAgent,
-          }
-        : undefined,
-    });
-    if (proxyConfiguration.enabled) {
-      logger.info("Configured Telegram proxy.", proxyConfiguration);
-      if (!proxyConfiguration.bunEnvProxyApplied) {
+    this.#bot = new Telegraf<AppContext>(options.botToken);
+
+    const proxyUrl = options.telegramProxyUrl?.trim();
+    if (proxyUrl) {
+      if (!canUseBunFetchTelegramProxy(proxyUrl)) {
         logger.warn(
-          "Telegram proxy uses a non-HTTP protocol; Bun's environment proxy fallback was not applied. If Telegram remains unreachable, prefer an http(s) proxy URL for TELEGRAM_PROXY_URL.",
-          {
-            protocol: proxyConfiguration.protocol,
-          },
+          "Telegram proxy uses a non-HTTP protocol which is not supported by Bun's fetch. Proxy will not take effect.",
+          { proxyUrl },
         );
+      } else {
+        const telegramClient = this.#bot.telegram as any;
+        const callApiViaBun = createBunTelegramCallApi({
+          botToken: options.botToken,
+          apiRoot: telegramClient.options.apiRoot,
+          apiMode: telegramClient.options.apiMode,
+          testEnv: telegramClient.options.testEnv,
+          proxyUrl,
+        });
+
+        telegramClient.callApi = async (method: string, payload: Record<string, unknown>, apiOptions?: { signal?: AbortSignal }) => {
+          return callApiViaBun(method, payload, apiOptions);
+        };
+
+        logger.info("Enabled Bun native Telegram API proxy transport.", { proxyUrl });
       }
-    }
-
-    if (canUseBunFetchTelegramProxy(options.telegramProxyUrl)) {
-      const telegramClient = this.#bot.telegram as any;
-      const originalCallApi = telegramClient.callApi.bind(telegramClient);
-      const callApiViaBun = createBunTelegramCallApi({
-        botToken: options.botToken,
-        apiRoot: telegramClient.options.apiRoot,
-        apiMode: telegramClient.options.apiMode,
-        testEnv: telegramClient.options.testEnv,
-        proxyUrl: options.telegramProxyUrl!.trim(),
-      });
-
-      telegramClient.callApi = async (method: string, payload: Record<string, unknown>, apiOptions?: { signal?: AbortSignal }) => {
-        try {
-          return await callApiViaBun(method, payload, apiOptions);
-        } catch (error) {
-          logger.warn("Bun native Telegram proxy request failed; falling back to telegraf transport.", {
-            method,
-            error,
-          });
-          return originalCallApi(method, payload, apiOptions);
-        }
-      };
-
-      logger.info("Enabled Bun native Telegram API proxy transport.", {
-        proxyProtocol: proxyConfiguration.protocol,
-      });
     }
 
     this.#adminId = options.adminId;
