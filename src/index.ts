@@ -1,8 +1,10 @@
 import { loadConfig } from "./config";
 import { GgSmsApp } from "./app";
 import { configureLogger, createLogger } from "./logger";
+import { applyTelegramProxyEnv } from "./bot/telegram-proxy-env";
 
 const config = loadConfig();
+applyTelegramProxyEnv(config.telegramProxyUrl, config.accountDashboardUrl);
 configureLogger(config.logLevel);
 const logger = createLogger("index");
 const app = new GgSmsApp(config);

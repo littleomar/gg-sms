@@ -90,7 +90,6 @@ export class GgSmsApp {
       botToken: config.botToken,
       adminId: config.botAdminId,
       initialNotifyChatId: config.botNotifyChatId,
-      telegramProxyUrl: config.telegramProxyUrl,
       modem: this.#modem,
       database: this.#database,
       drafts: this.#draftSessions,

@@ -4,7 +4,6 @@ import type { AccountProvider } from "../account/provider";
 import type { KeepaliveJob } from "../jobs/keepalive-job";
 import { createLogger } from "../logger";
 import type { ModemProvider } from "../modem/types";
-import { canUseBunFetchTelegramProxy, createBunTelegramCallApi } from "./telegram-transport";
 import { isAdminUser } from "./auth";
 import type { DraftSessionService } from "../sms/draft-session-service";
 import type { AppDatabase } from "../storage/database";
@@ -156,7 +155,6 @@ export class TelegramBotService {
     botToken: string;
     adminId: string;
     initialNotifyChatId?: string;
-    telegramProxyUrl?: string;
     modem: ModemProvider;
     database: AppDatabase;
     drafts: DraftSessionService;
@@ -165,32 +163,6 @@ export class TelegramBotService {
     onRuntimeError?: (error: Error) => void;
   }) {
     this.#bot = new Telegraf<AppContext>(options.botToken);
-
-    const proxyUrl = options.telegramProxyUrl?.trim();
-    if (proxyUrl) {
-      if (!canUseBunFetchTelegramProxy(proxyUrl)) {
-        logger.warn(
-          "Telegram proxy uses a non-HTTP protocol which is not supported by Bun's fetch. Proxy will not take effect.",
-          { proxyUrl },
-        );
-      } else {
-        const telegramClient = this.#bot.telegram as any;
-        const callApiViaBun = createBunTelegramCallApi({
-          botToken: options.botToken,
-          apiRoot: telegramClient.options.apiRoot,
-          apiMode: telegramClient.options.apiMode,
-          testEnv: telegramClient.options.testEnv,
-          proxyUrl,
-        });
-
-        telegramClient.callApi = async (method: string, payload: Record<string, unknown>, apiOptions?: { signal?: AbortSignal }) => {
-          return callApiViaBun(method, payload, apiOptions);
-        };
-
-        logger.info("Enabled Bun native Telegram API proxy transport.", { proxyUrl });
-      }
-    }
-
     this.#adminId = options.adminId;
     this.#modem = options.modem;
     this.#database = options.database;
