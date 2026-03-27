@@ -264,11 +264,15 @@ export class Ec200ModemProvider implements ModemProvider {
   async getStatus(): Promise<ModemStatus> {
     if (this.#ready && this.#readStream && this.#writeStream) {
       try {
-        await this.#enqueue(() => this.#refreshStatusInternal());
+        await Promise.race([
+          this.#enqueue(() => this.#refreshStatusInternal()),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Status refresh timed out")), 15_000),
+          ),
+        ]);
       } catch (error) {
         const details = error instanceof Error ? error.message : String(error);
         this.#debugLog("Status refresh failed", details);
-        this.#markDisconnected();
       }
     }
     return this.#status;
