@@ -338,7 +338,9 @@ export class TelegramBotService {
         this.#modem.getStatus(),
         this.#accountProvider.getSummary(),
       ]);
+      logger.info("Status data collected, sending reply.", { chatId: ctx.chat?.id });
       await ctx.reply(`${formatModemStatus(modemStatus)}\n\n${formatAccountSummary(accountSummary)}`);
+      logger.info("Status reply sent.", { chatId: ctx.chat?.id });
     });
 
     this.#bot.command("data", async (ctx) => {
