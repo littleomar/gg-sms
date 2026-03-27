@@ -5,7 +5,6 @@ export type AppConfig = {
   botToken: string;
   botAdminId: string;
   botNotifyChatId?: string;
-  telegramProxyUrl?: string;
   accountDashboardCookie?: string;
   accountDashboardUrl?: string;
   accountDashboardAcceptLanguage?: string;
@@ -77,7 +76,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     botToken: requireEnv("BOT_TOKEN", env),
     botAdminId: requireEnv("BOT_ADMIN_ID", env),
     botNotifyChatId: parseOptional("BOT_NOTIFY_CHAT_ID", env),
-    telegramProxyUrl: parseOptional("TELEGRAM_PROXY_URL", env),
     accountDashboardCookie: parseOptional("GG_DASHBOARD_COOKIE", env),
     accountDashboardUrl: parseOptional("GG_DASHBOARD_URL", env),
     accountDashboardAcceptLanguage: parseOptional("GG_DASHBOARD_ACCEPT_LANGUAGE", env),
