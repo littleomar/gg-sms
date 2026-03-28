@@ -1,5 +1,6 @@
 import { Markup, Telegraf, type Context } from "telegraf";
 
+import type { GiffgaffLoginService } from "../account/giffgaff-login-service";
 import type { AccountProvider } from "../account/provider";
 import type { KeepaliveJob } from "../jobs/keepalive-job";
 import { createLogger } from "../logger";
@@ -18,6 +19,7 @@ const BOT_MENU_COMMANDS = [
   { command: "sms", description: "新建短信草稿或查看 inbox" },
   { command: "keepalive", description: "执行一次最小流量保号" },
   { command: "account", description: "刷新并查看账户信息" },
+  { command: "login", description: "手动触发 giffgaff 登录" },
   { command: "accountcookie", description: "设置 giffgaff dashboard cookie" },
 ] as const;
 const logger = createLogger("bot.telegram");
@@ -71,6 +73,7 @@ function formatHelpText(): string {
     "/sms inbox [n] - 查看最近短信",
     "/keepalive - 执行一次最小流量保号",
     "/account - 刷新并查看账户信息",
+    "/login - 手动触发 giffgaff 登录（需配置 GG_USERNAME/GG_PASSWORD）",
     "/accountcookie <cookie> - 设置 dashboard cookie",
     "/accountcookie clear - 清除 dashboard cookie",
     "",
@@ -147,6 +150,7 @@ export class TelegramBotService {
   readonly #drafts: DraftSessionService;
   readonly #accountProvider: AccountProvider;
   readonly #keepaliveJob: KeepaliveJob;
+  readonly #loginService?: GiffgaffLoginService;
   readonly #onRuntimeError?: (error: Error) => void;
   #notifyChatId: string;
   #pollingTask: Promise<void> | null = null;
@@ -160,6 +164,7 @@ export class TelegramBotService {
     drafts: DraftSessionService;
     accountProvider: AccountProvider;
     keepaliveJob: KeepaliveJob;
+    loginService?: GiffgaffLoginService;
     onRuntimeError?: (error: Error) => void;
   }) {
     this.#bot = new Telegraf<AppContext>(options.botToken);
@@ -169,6 +174,7 @@ export class TelegramBotService {
     this.#drafts = options.drafts;
     this.#accountProvider = options.accountProvider;
     this.#keepaliveJob = options.keepaliveJob;
+    this.#loginService = options.loginService;
     this.#onRuntimeError = options.onRuntimeError;
     this.#notifyChatId =
       options.initialNotifyChatId ??
@@ -354,6 +360,42 @@ export class TelegramBotService {
           error: details,
         });
         await ctx.reply(`账户刷新失败: ${details}`);
+      }
+    });
+
+    this.#bot.command("login", async (ctx) => {
+      logger.info("Handling /login command.", { chatId: ctx.chat?.id });
+
+      if (!this.#loginService) {
+        await ctx.reply("未配置 GG_USERNAME / GG_PASSWORD，无法自动登录。请使用 /accountcookie 手动设置。");
+        return;
+      }
+
+      if (this.#loginService.isLoginInProgress()) {
+        await ctx.reply("登录正在进行中，请等待完成。");
+        return;
+      }
+
+      await ctx.reply("开始登录 giffgaff...");
+
+      try {
+        const cookie = await this.#loginService.login();
+        this.#database.setAccountDashboardCookie(cookie);
+        logger.info("Login via /login command succeeded.", { chatId: ctx.chat?.id });
+
+        try {
+          const summary = await this.#accountProvider.refresh();
+          await ctx.reply(`登录成功，cookie 已保存。\n\n${formatAccountSummary(summary)}`);
+        } catch {
+          await ctx.reply("登录成功，cookie 已保存。但 dashboard 刷新失败，请稍后使用 /account 重试。");
+        }
+      } catch (error) {
+        const details = error instanceof Error ? error.message : String(error);
+        logger.warn("Login via /login command failed.", { error, chatId: ctx.chat?.id });
+        this.#database.insertAlert("warning", "manual_login_failed", "Manual giffgaff login failed.", {
+          error: details,
+        });
+        await ctx.reply(`登录失败: ${details}`);
       }
     });
 

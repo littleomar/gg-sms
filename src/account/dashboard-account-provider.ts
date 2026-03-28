@@ -1,3 +1,4 @@
+import type { GiffgaffLoginService } from "./giffgaff-login-service";
 import type { AccountProvider, AccountSummary } from "./provider";
 import { createLogger } from "../logger";
 import type { AppDatabase } from "../storage/database";
@@ -56,6 +57,7 @@ export class DashboardAccountProvider implements AccountProvider {
   readonly #acceptLanguage: string;
   readonly #userAgent: string;
   readonly #timeoutMs: number;
+  readonly #loginService?: GiffgaffLoginService;
 
   constructor(options: {
     database: AppDatabase;
@@ -64,12 +66,14 @@ export class DashboardAccountProvider implements AccountProvider {
     acceptLanguage?: string;
     userAgent?: string;
     timeoutMs?: number;
+    loginService?: GiffgaffLoginService;
   }) {
     this.#database = options.database;
     this.#dashboardUrl = options.dashboardUrl ?? DEFAULT_DASHBOARD_URL;
     this.#acceptLanguage = options.acceptLanguage ?? DEFAULT_ACCEPT_LANGUAGE;
     this.#userAgent = options.userAgent ?? DEFAULT_USER_AGENT;
     this.#timeoutMs = options.timeoutMs ?? 15_000;
+    this.#loginService = options.loginService;
 
     if (options.bootstrapCookie && !this.#database.getAccountDashboardCookie()) {
       this.#database.setAccountDashboardCookie(options.bootstrapCookie);
@@ -98,16 +102,45 @@ export class DashboardAccountProvider implements AccountProvider {
   }
 
   async refresh(): Promise<AccountSummary> {
-    const cookie = this.#database.getAccountDashboardCookie();
+    let cookie = this.#database.getAccountDashboardCookie();
+
+    // No cookie — try auto-login first
+    if (!cookie && this.#loginService) {
+      cookie = await this.#performAutoLogin();
+    }
     if (!cookie) {
       logger.warn("Dashboard refresh requested without a configured cookie.");
-      throw new Error("Dashboard cookie is not configured. 请先使用 /accountcookie <cookie> 设置。");
+      throw new Error("Dashboard cookie is not configured. 请先使用 /accountcookie <cookie> 或 /login 登录。");
     }
 
+    const result = await this.#fetchDashboard(cookie);
+
+    // If fetch failed and we have login service, try re-login once
+    if (!result.airtimeCredit && this.#loginService) {
+      logger.info("Dashboard fetch failed with current cookie, attempting auto-login.");
+      const freshCookie = await this.#performAutoLogin();
+      if (freshCookie) {
+        const retryResult = await this.#fetchDashboard(freshCookie);
+        if (retryResult.airtimeCredit) {
+          return this.#applyDashboardResult(retryResult.airtimeCredit, retryResult.responseUrl);
+        }
+      }
+      throw new Error("Could not find the dashboard credit balance after re-login. The page structure may have changed.");
+    }
+
+    if (!result.airtimeCredit) {
+      throw new Error("Could not find the dashboard credit balance. The cookie may be expired or the page structure changed.");
+    }
+
+    return this.#applyDashboardResult(result.airtimeCredit, result.responseUrl);
+  }
+
+  async #fetchDashboard(cookie: string): Promise<{ airtimeCredit: string | null; responseUrl: string }> {
     logger.info("Refreshing dashboard account summary.", {
       dashboardUrl: this.#dashboardUrl,
       dashboardSessionUpdatedAt: this.#database.getAccountDashboardCookieUpdatedAt(),
     });
+
     const response = await fetch(this.#dashboardUrl, {
       headers: {
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -122,23 +155,28 @@ export class DashboardAccountProvider implements AccountProvider {
       signal: AbortSignal.timeout(this.#timeoutMs),
     });
 
+    const responseUrl = response.url || this.#dashboardUrl;
+
     if (!response.ok) {
       logger.warn("Dashboard request returned a non-OK response.", {
         status: response.status,
-        url: response.url || this.#dashboardUrl,
+        url: responseUrl,
       });
-      throw new Error(`Dashboard request failed with HTTP ${response.status}`);
+      return { airtimeCredit: null, responseUrl };
     }
 
     const html = await response.text();
     const airtimeCredit = extractAirtimeCreditFromDashboard(html);
     if (!airtimeCredit) {
       logger.warn("Dashboard refresh could not extract airtime credit.", {
-        dashboardUrl: response.url || this.#dashboardUrl,
+        dashboardUrl: responseUrl,
       });
-      throw new Error("Could not find the dashboard credit balance. The cookie may be expired or the page structure changed.");
     }
 
+    return { airtimeCredit, responseUrl };
+  }
+
+  #applyDashboardResult(airtimeCredit: string, responseUrl: string): AccountSummary {
     const fetchedAt = new Date().toISOString();
     const current = this.#database.getAccountTrackingState();
 
@@ -161,7 +199,7 @@ export class DashboardAccountProvider implements AccountProvider {
       airtimeCreditAmount: airtimeCredit,
       rawSnapshot: JSON.stringify({
         source: "dashboard",
-        url: response.url || this.#dashboardUrl,
+        url: responseUrl,
         extractedBalance: airtimeCredit,
       }),
     });
@@ -182,6 +220,25 @@ export class DashboardAccountProvider implements AccountProvider {
       nextKeepaliveDeadlineAt,
     });
 
-    return this.getSummary();
+    return {
+      implementationStatus: "available",
+      lastAttemptAt: this.#database.getAccountTrackingState().lastAccountAttemptAt,
+      airtimeCredit,
+      lastBalanceChangeAt,
+      nextKeepaliveDeadlineAt,
+      trackingStatus,
+    };
+  }
+
+  async #performAutoLogin(): Promise<string | null> {
+    try {
+      const cookie = await this.#loginService!.login();
+      this.#database.setAccountDashboardCookie(cookie);
+      logger.info("Auto-login succeeded, cookie stored.");
+      return cookie;
+    } catch (error) {
+      logger.warn("Auto-login failed.", { error });
+      return null;
+    }
   }
 }

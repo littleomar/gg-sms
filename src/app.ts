@@ -1,4 +1,5 @@
 import { DashboardAccountProvider } from "./account/dashboard-account-provider";
+import { GiffgaffHttpLoginService, type GiffgaffLoginService } from "./account/giffgaff-login-service";
 import type { AccountProvider } from "./account/provider";
 import type { AppConfig } from "./config";
 import { TelegramBotService } from "./bot/telegram-bot";
@@ -6,7 +7,7 @@ import { KeepaliveJob } from "./jobs/keepalive-job";
 import { createLogger } from "./logger";
 import { Ec200ModemProvider } from "./modem/ec200-modem-provider";
 import { MockModemProvider } from "./modem/mock-modem-provider";
-import type { ModemProvider } from "./modem/types";
+import type { InboundSms, ModemProvider } from "./modem/types";
 import { DraftSessionService } from "./sms/draft-session-service";
 import { AppDatabase, DatabaseDraftSessionStore } from "./storage/database";
 
@@ -40,6 +41,8 @@ export class GgSmsApp {
   readonly #draftSessions: DraftSessionService;
   readonly #keepaliveJob: KeepaliveJob;
   readonly #bot: TelegramBotService;
+  readonly #loginService: GiffgaffLoginService | null;
+  readonly #smsListeners: Array<(message: InboundSms) => boolean> = [];
   #botRetryTimer: ReturnType<typeof setTimeout> | null = null;
   #modemRetryTimer: ReturnType<typeof setTimeout> | null = null;
   #botStarting = false;
@@ -68,12 +71,33 @@ export class GgSmsApp {
             debug: config.modemDebug,
           });
 
+    this.#loginService =
+      config.ggUsername && config.ggPassword
+        ? new GiffgaffHttpLoginService({
+            username: config.ggUsername,
+            password: config.ggPassword,
+            userAgent: config.accountDashboardUserAgent,
+          })
+        : null;
+
+    if (this.#loginService) {
+      const loginService = this.#loginService;
+      this.#smsListeners.push((message: InboundSms): boolean => {
+        const match = message.body.match(/(\d{6}) is your giffgaff verification code/);
+        if (match && loginService.isLoginInProgress()) {
+          return loginService.receiveMfaCode(match[1]);
+        }
+        return false;
+      });
+    }
+
     this.#accountProvider = new DashboardAccountProvider({
       database: this.#database,
       bootstrapCookie: config.accountDashboardCookie,
       dashboardUrl: config.accountDashboardUrl,
       acceptLanguage: config.accountDashboardAcceptLanguage,
       userAgent: config.accountDashboardUserAgent,
+      loginService: this.#loginService ?? undefined,
     });
     this.#draftSessions = new DraftSessionService({
       store: new DatabaseDraftSessionStore(this.#database),
@@ -95,6 +119,7 @@ export class GgSmsApp {
       drafts: this.#draftSessions,
       accountProvider: this.#accountProvider,
       keepaliveJob: this.#keepaliveJob,
+      loginService: this.#loginService ?? undefined,
       onRuntimeError: (error) => {
         void this.#handleBotRuntimeFailure(error);
       },
@@ -225,6 +250,17 @@ export class GgSmsApp {
       });
       await withTimeout("Modem startup", this.#modem.start(async (message) => {
         const storedMessage = this.#database.insertInboundSms(message);
+
+        // Check if any listener claims this message (e.g. MFA code interceptor)
+        const claimed = this.#smsListeners.some((listener) => listener(message));
+        if (claimed) {
+          logger.info("Inbound SMS claimed by listener, skipping Telegram push.", {
+            messageId: storedMessage.id,
+            remoteNumber: storedMessage.remoteNumber,
+          });
+          return;
+        }
+
         try {
           await this.#bot.pushInboundSms(storedMessage.id);
         } catch (error) {
