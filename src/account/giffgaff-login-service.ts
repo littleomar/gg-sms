@@ -168,8 +168,13 @@ export class GiffgaffHttpLoginService implements GiffgaffLoginService {
     }
 
     const credentialBody = await credentialResponse.json() as { code?: string; message?: string };
+    logger.debug("Step 2 response.", { status: credentialResponse.status, body: credentialBody });
 
-    if (credentialBody.code !== "mfa.required") {
+    const isMfaRequired =
+      credentialBody.code === "mfa.required" ||
+      (credentialResponse.status === 401 && credentialBody.message === "mfa.required");
+
+    if (!isMfaRequired) {
       // If not MFA required, might be a direct success or an error
       if (credentialResponse.ok) {
         logger.info("Login succeeded without MFA.");
