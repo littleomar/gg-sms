@@ -321,7 +321,10 @@ export class Ec200ModemProvider implements ModemProvider {
       timeoutMs,
     });
     try {
-      const result = await this.#enqueue(() => this.#performKeepaliveRequestInternal(url, timeoutMs));
+      // Each AT command is individually enqueued so that URC-triggered SMS
+      // reads (#handleInboundMessage) can interleave between keepalive steps
+      // instead of being blocked for the entire keepalive duration.
+      const result = await this.#performKeepaliveRequestCooperative(url, timeoutMs);
       logger.info("Modem-side keepalive request completed.", result);
       return result;
     } finally {
@@ -329,7 +332,7 @@ export class Ec200ModemProvider implements ModemProvider {
     }
   }
 
-  async #performKeepaliveRequestInternal(url: string, timeoutMs: number): Promise<KeepaliveRequestResult> {
+  async #performKeepaliveRequestCooperative(url: string, timeoutMs: number): Promise<KeepaliveRequestResult> {
     let parsedUrl: URL;
     try {
       parsedUrl = new URL(url);
@@ -342,7 +345,7 @@ export class Ec200ModemProvider implements ModemProvider {
       throw new Error(`Unsupported keepalive URL protocol: ${parsedUrl.protocol}`);
     }
 
-    await this.#refreshStatusInternal();
+    await this.#refreshStatusQueued();
     const originalDataAttached = this.#status.dataAttached;
     const originalPdpActive = this.#status.pdpActive;
     const responseTimeoutSeconds = this.#toCommandTimeoutSeconds(timeoutMs);
@@ -355,25 +358,25 @@ export class Ec200ModemProvider implements ModemProvider {
         originalPdpActive,
         protocol,
       });
-      await this.#sendCommandInternal(`AT+QICSGP=${KEEPALIVE_CONTEXT_ID},1,"${this.#apnName}","${this.#apnUser ?? ""}","${this.#apnPass ?? ""}",1`);
-      await this.#sendCommandInternal("AT+CGATT=1");
-      await this.#sendCommandInternal(`AT+QHTTPCFG="contextid",${KEEPALIVE_CONTEXT_ID}`);
-      await this.#sendCommandInternal('AT+QHTTPCFG="requestheader",0');
-      await this.#sendCommandInternal('AT+QHTTPCFG="responseheader",0');
+      await this.#sendCommand(`AT+QICSGP=${KEEPALIVE_CONTEXT_ID},1,"${this.#apnName}","${this.#apnUser ?? ""}","${this.#apnPass ?? ""}",1`);
+      await this.#sendCommand("AT+CGATT=1");
+      await this.#sendCommand(`AT+QHTTPCFG="contextid",${KEEPALIVE_CONTEXT_ID}`);
+      await this.#sendCommand('AT+QHTTPCFG="requestheader",0');
+      await this.#sendCommand('AT+QHTTPCFG="responseheader",0');
 
       if (protocol === "https") {
-        await this.#sendCommandInternal(`AT+QHTTPCFG="sslctxid",${KEEPALIVE_SSL_CONTEXT_ID}`);
-        await this.#sendCommandInternal(`AT+QSSLCFG="seclevel",${KEEPALIVE_SSL_CONTEXT_ID},0`);
+        await this.#sendCommand(`AT+QHTTPCFG="sslctxid",${KEEPALIVE_SSL_CONTEXT_ID}`);
+        await this.#sendCommand(`AT+QSSLCFG="seclevel",${KEEPALIVE_SSL_CONTEXT_ID},0`);
       }
 
-      await this.#sendCommandInternal(`AT+QIACT=${KEEPALIVE_CONTEXT_ID}`);
-      await this.#waitForKeepaliveContextReadyInternal(timeoutMs);
-      await this.#sendConnectWriteCommandInternal(
+      await this.#sendCommand(`AT+QIACT=${KEEPALIVE_CONTEXT_ID}`);
+      await this.#waitForKeepaliveContextReadyQueued(timeoutMs);
+      await this.#sendConnectWriteCommand(
         `AT+QHTTPURL=${Buffer.byteLength(url, "utf8")},${responseTimeoutSeconds}`,
         url,
       );
 
-      const httpGetLine = await this.#sendCommandAndWaitForLineInternal(
+      const httpGetLine = await this.#sendCommandAndWaitForLine(
         `AT+QHTTPGET=${responseTimeoutSeconds}`,
         "+QHTTPGET:",
         timeoutMs,
@@ -384,7 +387,7 @@ export class Ec200ModemProvider implements ModemProvider {
       }
 
       responseLengthHint = httpGetResult.contentLength;
-      const responseLength = await this.#discardHttpResponseInternal(timeoutMs, responseLengthHint);
+      const responseLength = await this.#discardHttpResponseQueued(timeoutMs, responseLengthHint);
 
       return {
         httpStatus: httpGetResult.httpStatus,
@@ -397,7 +400,7 @@ export class Ec200ModemProvider implements ModemProvider {
     } finally {
       let cleanupError: Error | null = null;
       try {
-        await this.#cleanupKeepaliveSessionInternal({
+        await this.#cleanupKeepaliveSessionQueued({
           restoreDetached: !originalDataAttached,
         });
       } catch (error) {
@@ -409,7 +412,7 @@ export class Ec200ModemProvider implements ModemProvider {
       }
 
       try {
-        await this.#refreshStatusInternal();
+        await this.#refreshStatusQueued();
       } catch {
         this.#markDisconnected();
       }
@@ -595,6 +598,46 @@ export class Ec200ModemProvider implements ModemProvider {
     };
   }
 
+  async #refreshStatusQueued(): Promise<void> {
+    const cpin = await this.#sendCommand("AT+CPIN?");
+    const csq = await this.#sendCommand("AT+CSQ");
+    const creg = await this.#sendCommand("AT+CREG?");
+    const cgatt = await this.#sendCommand("AT+CGATT?");
+    const cgpaddr = await this.#sendCommand("AT+CGPADDR=1");
+    const cops = await this.#sendCommand("AT+COPS?");
+    const ati = await this.#sendCommand("ATI");
+    const cnum = await this.#sendOptionalCommand("AT+CNUM");
+
+    const signalMatch = csq.join("\n").match(/\+CSQ:\s*(\d+),/);
+    const registrationMatch = creg.join("\n").match(/\+CREG:\s*\d,(\d)/);
+    const attachedMatch = cgatt.join("\n").match(/\+CGATT:\s*(\d)/);
+    const addressMatch = cgpaddr.join("\n").match(/\+CGPADDR:\s*1,("?)([^"\r\n]+)\1/);
+    const operatorFields = parseQuotedFields(cops.join("\n"));
+    const numberFields = parseQuotedFields(cnum.join("\n"));
+
+    const ipAddress = addressMatch?.[2] && addressMatch[2] !== "0.0.0.0" ? addressMatch[2] : null;
+    const phoneNumber = numberFields[1]
+      ? maybeDecodeUcs2(numberFields[1])
+      : numberFields[0]
+        ? maybeDecodeUcs2(numberFields[0])
+        : this.#status.phoneNumber ?? null;
+
+    this.#status = {
+      connected: true,
+      simReady: cpin.some((line) => line.includes("READY")),
+      registered: registrationMatch ? ["1", "5"].includes(registrationMatch[1]) : false,
+      phoneNumber,
+      operatorName: operatorFields[0] ? maybeDecodeUcs2(operatorFields[0]) : null,
+      signalQuality: signalMatch ? Number.parseInt(signalMatch[1], 10) : null,
+      smsReady: true,
+      dataAttached: attachedMatch?.[1] === "1",
+      pdpActive: Boolean(ipAddress),
+      ipAddress,
+      modemModel: ati.find((line) => line && !line.startsWith("AT")) ?? this.#status.modemModel,
+      lastUpdatedAt: nowIso(),
+    };
+  }
+
   async #waitForKeepaliveContextReadyInternal(timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -642,6 +685,56 @@ export class Ec200ModemProvider implements ModemProvider {
     if (options.restoreDetached) {
       logger.info("Restoring modem data state to detached after keepalive.");
       await this.#sendCommandInternal("AT+CGATT=0");
+    }
+  }
+
+  async #waitForKeepaliveContextReadyQueued(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const lines = await this.#sendOptionalCommand("AT+QIACT?");
+      const match = lines
+        .map((line) => line.match(new RegExp(`^\\+QIACT:\\s*${KEEPALIVE_CONTEXT_ID},\\d,\\d,"([^"]+)"`)))
+        .find((value): value is RegExpMatchArray => value !== null);
+
+      if (match?.[1] && match[1] !== "0.0.0.0") {
+        this.#status = {
+          ...this.#status,
+          connected: true,
+          dataAttached: true,
+          pdpActive: true,
+          ipAddress: match[1],
+          lastUpdatedAt: nowIso(),
+        };
+        return;
+      }
+
+      await sleep(1_000);
+    }
+
+    throw new Error("Timed out waiting for keepalive PDP context to become ready");
+  }
+
+  async #discardHttpResponseQueued(timeoutMs: number, responseLengthHint: number | null): Promise<number> {
+    const readLine = await this.#sendCommandAndWaitForLine(
+      `AT+QHTTPREAD=${this.#toCommandTimeoutSeconds(timeoutMs)}`,
+      "+QHTTPREAD:",
+      timeoutMs,
+    );
+
+    const readResult = this.#parseReadStatusLine(readLine);
+    if (readResult.err !== 0) {
+      throw new Error(`Module HTTP response read failed with error ${readResult.err}`);
+    }
+
+    return responseLengthHint ?? readResult.responseLength ?? 0;
+  }
+
+  async #cleanupKeepaliveSessionQueued(options: { restoreDetached: boolean }): Promise<void> {
+    await this.#sendOptionalCommand("AT+QHTTPSTOP");
+    await this.#sendOptionalCommand(`AT+QIDEACT=${KEEPALIVE_CONTEXT_ID}`);
+    if (options.restoreDetached) {
+      logger.info("Restoring modem data state to detached after keepalive.");
+      await this.#sendCommand("AT+CGATT=0");
     }
   }
 
@@ -831,6 +924,19 @@ export class Ec200ModemProvider implements ModemProvider {
     }
   }
 
+  async #sendCommandAndWaitForLine(command: string, prefix: string, timeoutMs: number): Promise<string> {
+    return this.#enqueue(async () => {
+      const waiter = this.#createLineWaiter(prefix, timeoutMs);
+      try {
+        await this.#sendCommandInternal(command);
+        return await waiter.promise;
+      } catch (error) {
+        waiter.cancel();
+        throw error;
+      }
+    });
+  }
+
   async #sendCommandAndWaitForLineInternal(command: string, prefix: string, timeoutMs: number): Promise<string> {
     const waiter = this.#createLineWaiter(prefix, timeoutMs);
     try {
@@ -840,6 +946,10 @@ export class Ec200ModemProvider implements ModemProvider {
       waiter.cancel();
       throw error;
     }
+  }
+
+  async #sendConnectWriteCommand(command: string, payload: string): Promise<string[]> {
+    return this.#enqueue(() => this.#sendConnectWriteCommandInternal(command, payload));
   }
 
   async #sendConnectWriteCommandInternal(command: string, payload: string): Promise<string[]> {
