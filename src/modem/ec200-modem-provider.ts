@@ -212,19 +212,19 @@ export class Ec200ModemProvider implements ModemProvider {
   }
 
   async drainInbox(): Promise<void> {
-    this.#debugLog("Scanning modem inbox for unread SMS");
-    const lines = await this.#sendCommand('AT+CMGL="REC UNREAD"');
+    this.#debugLog("Scanning modem inbox for all SMS");
+    const lines = await this.#sendCommand('AT+CMGL="ALL"');
     const indexes = lines
       .map((line) => line.match(/^\+CMGL:\s*(\d+),/))
       .filter((match): match is RegExpMatchArray => match !== null)
       .map((match) => Number.parseInt(match[1], 10));
 
     if (indexes.length === 0) {
-      this.#debugLog("No unread SMS found during startup scan");
+      this.#debugLog("No SMS found in modem inbox");
       return;
     }
 
-    this.#debugLog(`Found ${indexes.length} unread SMS during startup scan: ${indexes.join(", ")}`);
+    this.#debugLog(`Found ${indexes.length} SMS in modem inbox: ${indexes.join(", ")}`);
     for (const index of indexes) {
       await this.#handleInboundMessage(index, "startup_scan");
     }
@@ -417,6 +417,12 @@ export class Ec200ModemProvider implements ModemProvider {
         this.#markDisconnected();
       }
 
+      try {
+        await this.#applyNotificationSettings();
+      } catch (error) {
+        logger.warn("Failed to re-apply SMS notification settings after keepalive.", { error });
+      }
+
       if (!requestError && cleanupError) {
         throw cleanupError;
       }
@@ -484,6 +490,10 @@ export class Ec200ModemProvider implements ModemProvider {
     await this.#sendCommand("AT+CMGF=1");
     await this.#sendCommand("AT+CSMP=17,167,0,8");
     await this.#sendCommand('AT+CPMS="ME","ME","ME"');
+    await this.#applyNotificationSettings();
+  }
+
+  async #applyNotificationSettings(): Promise<void> {
     await this.#sendCommand("AT+CNMI=2,1,0,0,0");
   }
 
