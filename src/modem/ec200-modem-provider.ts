@@ -792,13 +792,16 @@ export class Ec200ModemProvider implements ModemProvider {
       await this.#sendCommand(`AT+CMGD=${index}`);
 
       if (!this.#onInboundSms) {
+        logger.warn("Inbound SMS discarded because no callback is set.", { index, source });
         return;
       }
 
-      this.#debugLog("Inbound SMS parsed", `index=${index}, remote=${remoteNumber}, body=${maybeDecodeUcs2(body)}`);
+      const decodedBody = maybeDecodeUcs2(body);
+      logger.info("Inbound SMS received.", { index, source, remoteNumber, bodyLength: decodedBody.length });
+      this.#debugLog("Inbound SMS parsed", `index=${index}, remote=${remoteNumber}, body=${decodedBody}`);
       await this.#onInboundSms({
         remoteNumber,
-        body: maybeDecodeUcs2(body),
+        body: decodedBody,
         receivedAt: nowIso(),
         modemMessageId: String(index),
       });
@@ -837,6 +840,7 @@ export class Ec200ModemProvider implements ModemProvider {
     if (line.startsWith("+CMTI:")) {
       const match = line.match(/,(\d+)$/);
       if (match) {
+        logger.info("Received SMS notification from modem.", { index: match[1], raw: line });
         void this.#handleInboundMessage(Number.parseInt(match[1], 10));
       }
       return;
